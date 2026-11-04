@@ -1,0 +1,180 @@
+name: papirdigitalizalas
+
+services:
+  # 1. PostgreSQL adatbázis (Működési alap - Unraid SSD)
+  paperless-db:
+    image: postgres:16-alpine
+    container_name: paperless-db
+    restart: unless-stopped
+    volumes:
+      - ${UNRAID_APPDATA_ROOT:-/mnt/disks/QM00001/_HOMELAB/_DOCKER/_DOCKER_APPDATA/_PAPERLESS}/pgdata:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: paperless
+      POSTGRES_USER: paperless
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-paperless_pg_secret_2026}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paperless -d paperless"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - paperless-net
+
+  # 2. Redis broker (Cache és feladat-sor - Unraid SSD)
+  paperless-redis:
+    image: redis:7-alpine
+    container_name: paperless-redis
+    restart: unless-stopped
+    volumes:
+      - ${UNRAID_APPDATA_ROOT:-/mnt/disks/QM00001/_HOMELAB/_DOCKER/_DOCKER_APPDATA/_PAPERLESS}/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - paperless-net
+
+  # 3. Paperless-ngx Dokumentumkezelő és Magyar OCR Motor
+  paperless-ngx:
+    image: ghcr.io/paperless-ngx/paperless-ngx:latest
+    container_name: paperless-ngx
+    restart: unless-stopped
+    depends_on:
+      paperless-db:
+        condition: service_healthy
+      paperless-redis:
+        condition: service_healthy
+    ports:
+      - "8010:8000"
+    environment:
+      PAPERLESS_REDIS: redis://paperless-redis:6379
+      PAPERLESS_DBHOST: paperless-db
+      PAPERLESS_DBNAME: paperless
+      PAPERLESS_DBUSER: paperless
+      PAPERLESS_DBPASS: ${POSTGRES_PASSWORD:-paperless_pg_secret_2026}
+      PAPERLESS_SECRET_KEY: ${PAPERLESS_SECRET_KEY:-paperless_menti_secret_key_2026}
+      PAPERLESS_URL: http://192.168.0.32:8010
+      PAPERLESS_TIME_ZONE: Europe/Budapest
+      USERMAP_UID: 99
+      USERMAP_GID: 100
+
+      # Ideiglenes OCR munkafájlok / cache az SSD-n (feldolgozás után automatikusan törlődik)
+      PAPERLESS_SCRATCH_DIR: /usr/src/paperless/scratch
+
+      # Kezdeti admin fiók automatikus létrehozása
+      PAPERLESS_ADMIN_USER: ${PAPERLESS_ADMIN_USER:-admin}
+      PAPERLESS_ADMIN_PASSWORD: ${PAPERLESS_ADMIN_PASSWORD:-menti2026}
+      PAPERLESS_ADMIN_MAIL: ${PAPERLESS_ADMIN_MAIL:-admin@menti.local}
+
+      # Gmail OAuth beállítások
+      PAPERLESS_GMAIL_OAUTH_CLIENT_ID: ${PAPERLESS_GMAIL_OAUTH_CLIENT_ID:-}
+      PAPERLESS_GMAIL_OAUTH_CLIENT_SECRET: ${PAPERLESS_GMAIL_OAUTH_CLIENT_SECRET:-}
+
+      # Magyar + Szlovák + Angol OCR és automata képjavítás
+      PAPERLESS_OCR_LANGUAGE: hun+slk+eng
+      PAPERLESS_OCR_LANGUAGES: hun slk eng
+      PAPERLESS_OCR_MODE: skip
+      PAPERLESS_OCR_CLEAN: clean
+      PAPERLESS_OCR_DESKEW: "true"
+      PAPERLESS_OCR_ROTATE_PAGES: "true"
+
+      # CPU optimalizáció
+      PAPERLESS_TASK_WORKERS: 2
+      PAPERLESS_THREADS_PER_WORKER: 3
+
+      # Unraid mappa figyelés (Consume - v3 kompatibilis polling)
+      PAPERLESS_CONSUMER_POLLING: 5
+      PAPERLESS_CONSUMER_POLLING_INTERVAL: 5
+      PAPERLESS_EMAIL_TASK_CRON: "*/3 * * * *"
+      PAPERLESS_CONSUMER_RECURSIVE: "true"
+      PAPERLESS_CONSUMER_SUBDIRS_AS_TAGS: "true"
+      PAPERLESS_CONSUMER_DELETE_DUPLICATES: "false"
+
+      # Háztartási mappastruktúra az Unraid HDD lemezen (Kategória / Év / Dátum_Partner_Cím.pdf)
+      PAPERLESS_FILENAME_FORMAT: "{{ document_type }}/{{ created_year }}/{{ created_year }}-{{ created_month }}-{{ created_day }}_{{ correspondent }}_{{ title }}"
+      PAPERLESS_FILENAME_FORMAT_REMOVE_NONE: "true"
+
+      # Vonalkódos elválasztólapok és sorszámozás (ASN) támogatása
+      PAPERLESS_CONSUMER_ENABLE_BARCODES: "true"
+      PAPERLESS_CONSUMER_ENABLE_ASN_BARCODE: "true"
+
+      # Post-consume script az azonnali JSON szinkronhoz
+      PAPERLESS_POST_CONSUME_SCRIPT: /usr/src/paperless/scripts/export_json.sh
+    volumes:
+      # --- SSD-n: Csak a működési alapok, keresőindex, OCR cache és kis előnézeti/review képek ---
+      - ${UNRAID_APPDATA_ROOT:-/mnt/disks/QM00001/_HOMELAB/_DOCKER/_DOCKER_APPDATA/_PAPERLESS}/data:/usr/src/paperless/data
+      - ${UNRAID_APPDATA_ROOT:-/mnt/disks/QM00001/_HOMELAB/_DOCKER/_DOCKER_APPDATA/_PAPERLESS}/scratch:/usr/src/paperless/scratch
+      - ${UNRAID_APPDATA_ROOT:-/mnt/disks/QM00001/_HOMELAB/_DOCKER/_DOCKER_APPDATA/_PAPERLESS}/thumbnails:/usr/src/paperless/media/documents/thumbnails
+      - ${UNRAID_APPDATA_ROOT:-/mnt/disks/QM00001/_HOMELAB/_DOCKER/_DOCKER_APPDATA/_PAPERLESS}/scripts:/usr/src/paperless/scripts:ro
+      # --- Nagy Unraid HDD tömbön (/mnt/user): Minden dokumentum, PDF archívum, JSON és mentés ---
+      - ${UNRAID_DOCS_ROOT:-/mnt/user/_HERMES_WORKDIR/DOKUMENTUMOK}/01_BEOLVASAS_IDE:/usr/src/paperless/consume
+      - ${UNRAID_DOCS_ROOT:-/mnt/user/_HERMES_WORKDIR/DOKUMENTUMOK}/02_ARCHIVUM_PDF:/usr/src/paperless/media
+      - ${UNRAID_DOCS_ROOT:-/mnt/user/_HERMES_WORKDIR/DOKUMENTUMOK}/03_JSON_ADATOK:/usr/src/paperless/json_output
+      - ${UNRAID_DOCS_ROOT:-/mnt/user/_HERMES_WORKDIR/DOKUMENTUMOK}/04_BIZTONSAGI_MENTES_EXPORT:/usr/src/paperless/export
+    networks:
+      - paperless-net
+
+  # 4. Háztartási AI Kategorizáló (OpenAI OAuth gpt-6-luna / Ollama / Gemini) és JSON Export Szolgáltatás
+  paperless-household-agent:
+    image: python:3.12-slim
+    container_name: paperless-household-agent
+    user: "99:100"
+    restart: unless-stopped
+    depends_on:
+      - paperless-ngx
+    ports:
+      - "3006:3006"
+    environment:
+      PAPERLESS_URL: http://paperless-ngx:8000
+      PAPERLESS_PUBLIC_URL: http://192.168.0.32:8010
+      PAPERLESS_ADMIN_USER: ${PAPERLESS_ADMIN_USER:-admin}
+      PAPERLESS_ADMIN_PASSWORD: ${PAPERLESS_ADMIN_PASSWORD:-menti2026}
+      AI_PROVIDER: ${AI_PROVIDER:-openai-oauth}
+      CODEX_MODEL: ${CODEX_MODEL:-gpt-6-luna}
+      CODEX_AUTH_FILE: /oauth/auth.json
+      OAUTH_PROXY_PORT: 3006
+      OLLAMA_URL: ${OLLAMA_URL:-http://192.168.0.77:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-gemma3:4b}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      JSON_OUTPUT_DIR: /json_output
+      CONSUME_DIR: /consume
+      STAGING_DIR: /staging
+      UNRAID_PUBLIC_BASE: ${UNRAID_DOCS_ROOT:-/mnt/user/_HERMES_WORKDIR/DOKUMENTUMOK}
+      SYNC_INTERVAL_SECONDS: 10
+    volumes:
+      - ${UNRAID_APPDATA_ROOT:-/mnt/disks/QM00001/_HOMELAB/_DOCKER/_DOCKER_APPDATA/_PAPERLESS}/scripts:/app:ro
+      - ${CODEX_OAUTH_DIR:-/mnt/user/_HERMES_WORKDIR/.codex_oauth}:/oauth
+      - ${UNRAID_DOCS_ROOT:-/mnt/user/_HERMES_WORKDIR/DOKUMENTUMOK}/01_BEOLVASAS_IDE:/consume
+      - ${UNRAID_DOCS_ROOT:-/mnt/user/_HERMES_WORKDIR/DOKUMENTUMOK}/_SZKENNER_PUFFER:/staging
+      - ${UNRAID_DOCS_ROOT:-/mnt/user/_HERMES_WORKDIR/DOKUMENTUMOK}/03_JSON_ADATOK:/json_output
+    command: ["python3", "/app/household_ai_and_json_daemon.py"]
+    networks:
+      - paperless-net
+
+  # 5. Paperless-AI Review & Vezérlőpult (SSD-n csak a kis konfiguráció/review DB)
+  paperless-ai:
+    image: ghcr.io/clusterzx/paperless-ai:latest
+    container_name: paperless-ai
+    restart: unless-stopped
+    depends_on:
+      - paperless-ngx
+    ports:
+      - "3005:3000"
+    volumes:
+      - ${UNRAID_APPDATA_ROOT:-/mnt/disks/QM00001/_HOMELAB/_DOCKER/_DOCKER_APPDATA/_PAPERLESS}/paperless-ai:/app/data
+    networks:
+      - paperless-net
+
+  # MEGJEGYZÉS: Az Epson szkenner konténerek (epson-scan-single, epson-scan-page,
+  # epson-scan-finish) a docker-compose.scanner.yml fájlban futnak dedikált macvlan
+  # hálózaton (egyedi fizikai MAC címekkel: 02:42:c0:a8:00:e6 / e7 / e8), mert az
+  # Unraid ipvlan br0 hálózata közös MAC címet ad, amit az Epson XP-610 egyetlen
+  # gépnek lát.
+
+networks:
+  paperless-net:
+    driver: bridge

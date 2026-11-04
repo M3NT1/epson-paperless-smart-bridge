@@ -1,0 +1,266 @@
+import dgram from "node:dgram";
+import { createLogger } from "./logger.js";
+import { PID_FF680W, PID_DS575W, extractPid } from "./printer-ids.js";
+import { getLocalIpForTarget, normalizeIPv4 } from "./network.js";
+const log = createLogger("keepalive");
+// Announced PIDs (uppercased "PID XXXX") that use the NetScanMonitor v3.0
+// keepalive wire format. These are the button-only DS-family scanners — the
+// FF-680W (016B) and its DS-575W sibling (0169). Everything else defaults to
+// v2.0. `NETSCAN_VERSION` still overrides this per the config docs.
+const V3_KEEPALIVE_PRODUCTS = new Set([PID_FF680W, PID_DS575W]);
+/**
+ * Builds the UDP keepalive packet that registers this service as a
+ * scan destination on the Epson printer's panel.
+ *
+ * Packet layout (from Wireshark capture analysis):
+ *   Offset 0-1:   02 07          — command type
+ *   Offset 2-3:   00 00          — reserved
+ *   Offset 4:     total_len      — total packet length
+ *   Offset 5-10:  00 00 00 00 00 00 — reserved
+ *   Offset 11:    seq            — sequence number echoed from the printer's 02 06 announcement
+ *   Offset 12:    00             — padding
+ *   Offset 13:    dest_id        — destination ID
+ *   Offset 14-15: language       — 2-char ASCII (e.g. "en")
+ *   Offset 16-19: str_len        — string data length (big-endian uint32, excludes null terminator)
+ *   Offset 20+:   key-value string + null terminator
+ */
+export function buildKeepalivePacket(opts, seq) {
+    const version = opts.version ?? "2.0";
+    const fields = [
+        ...(version === "3.0" ? ["(Ver=3.0)"] : []),
+        `(ClientName=${opts.clientName})`,
+        `(IPAddress=${opts.ipAddress})`,
+        `(EventPort=${opts.eventPort})`,
+        ...(version === "3.0" ? [`(Group=${opts.group ?? 0})`] : []),
+    ];
+    const kvString = `${fields.join(",")}\0`;
+    const stringBytes = Buffer.from(kvString, "ascii");
+    const headerLen = 20;
+    const totalLen = headerLen + stringBytes.length;
+    const packet = Buffer.alloc(totalLen);
+    // Header
+    packet[0] = 0x02; // command type byte 1
+    packet[1] = 0x07; // command type byte 2
+    // bytes 2-3 stay 0x00 (reserved)
+    packet[4] = totalLen; // total packet length
+    // bytes 5-10 stay 0x00 (reserved)
+    packet[11] = seq; // sequence number echoed from printer's announcement
+    // byte 12 stays 0x00 (padding)
+    packet[13] = opts.destId; // destination ID
+    packet.write(opts.language, 14, 2, "ascii"); // language code
+    // str_len excludes the null terminator byte (matches Wireshark capture)
+    packet.writeUInt32BE(stringBytes.length - 1, 16); // string data length
+    // Key-value string payload
+    stringBytes.copy(packet, headerLen);
+    return packet;
+}
+/**
+ * Parses a printer announcement packet (broadcast by the printer to 239.255.255.253:2968).
+ *
+ * The announcement uses command type 02 06. Byte 11 carries the sequence number
+ * that must be echoed in our keepalive response.
+ *
+ * Returns `{ seq }` if the packet looks like a valid announcement, or `null` if it
+ * doesn't match (so callers can ignore unrelated multicast traffic).
+ */
+export function parsePrinterAnnouncement(data) {
+    if (data.length < 12)
+        return null;
+    if (data[0] !== 0x02 || data[1] !== 0x06 || data[2] !== 0x00 || data[3] !== 0x00) {
+        return null;
+    }
+    return { seq: data[11], productName: extractPid(data.toString("latin1")) };
+}
+/**
+ * Creates a responder that listens on the multicast group for printer announcements
+ * and responds with a burst of keepalive packets echoing the printer's sequence number.
+ *
+ * This replaces the old `createKeepaliveSender`, which fired unsolicited keepalives
+ * every 500 ms with a hardcoded sequence number. The printer only opens UDP 2968
+ * during ~60-second windows after broadcasting its own announcement, and only
+ * accepts keepalives whose byte 11 matches the announcement sequence.
+ */
+export function createKeepaliveResponder(opts) {
+    let socket = null;
+    let sender = null;
+    let boundPort = 0;
+    // Track all pending burst timers so we can cancel them on stop()
+    const pendingTimers = [];
+    // seq → auto-expire timer; paired lifecycle so stop() can cancel both.
+    // See dedupWindowMs JSDoc above for the rationale.
+    const seenSeqs = new Map();
+    // Unrecognised source IP → auto-expire timer. Throttles the rejected-peer
+    // warning to once per address per dedup window, so a chatty stale beacon
+    // can't flood the log while the mismatch persists.
+    const warnedPeers = new Map();
+    const dedupWindowMs = opts.dedupWindowMs ?? 30_000;
+    return {
+        get boundPort() {
+            return boundPort;
+        },
+        start() {
+            return new Promise((resolve, reject) => {
+                socket = dgram.createSocket({ type: "udp4", reuseAddr: true });
+                sender = dgram.createSocket("udp4");
+                socket.on("error", (err) => {
+                    log.error("Keepalive responder socket error", err);
+                });
+                sender.on("error", (err) => {
+                    log.error("Keepalive sender socket error", err);
+                });
+                socket.on("message", (data, rinfo) => {
+                    void (async () => {
+                        const announcement = parsePrinterAnnouncement(data);
+                        if (!announcement) {
+                            // Not an 02 06 announcement. The socket is bound to 0.0.0.0:2968,
+                            // so unicast probes land here too — some models may validate a
+                            // destination with a different command type before scanning.
+                            // Surface the bytes at debug instead of dropping them invisibly.
+                            log.debug(`Ignoring non-announcement UDP packet from ${rinfo.address}:${rinfo.port} — ` +
+                                `${data.length} bytes: ${data.subarray(0, 64).toString("hex")}${data.length > 64 ? "…" : ""}`);
+                            return;
+                        }
+                        const seqHex = `0x${announcement.seq.toString(16).padStart(2, "0")}`;
+                        const source = normalizeIPv4(rinfo.address);
+                        if (!source ||
+                            (opts.target
+                                ? !(await opts.target.accepts(source))
+                                : source !== normalizeIPv4(opts.printerIp))) {
+                            // A mismatched beacon means no keepalive goes out and the panel
+                            // destination never appears — a stale DNS record is the likeliest
+                            // cause. Warn (parity with the push-scan rejection), naming the
+                            // observed and expected addresses, throttled per address.
+                            const observed = rinfo.address;
+                            if (!warnedPeers.has(observed)) {
+                                const expected = opts.target
+                                    ? `${opts.target.hostname ?? "configured target"} [${[...opts.target.addresses].join(", ") || "unresolved"}]`
+                                    : (normalizeIPv4(opts.printerIp) ?? opts.printerIp);
+                                log.warn(`Ignoring announcement from unrecognised peer ${observed} — expected ${expected}`);
+                                const warnExpiry = setTimeout(() => warnedPeers.delete(observed), dedupWindowMs);
+                                warnedPeers.set(observed, warnExpiry);
+                            }
+                            return;
+                        }
+                        const dedupKey = `${source}:${announcement.seq}`;
+                        if (seenSeqs.has(dedupKey)) {
+                            log.debug(`Duplicate printer announcement from ${rinfo.address} — seq=${seqHex} already handled within ${dedupWindowMs}ms window, skipping burst`);
+                            return;
+                        }
+                        // Mark this seq as recently handled; auto-expire so a later
+                        // announcement that reuses the same seq (byte wraps at 256) still fires.
+                        const expiry = setTimeout(() => {
+                            seenSeqs.delete(dedupKey);
+                        }, dedupWindowMs);
+                        seenSeqs.set(dedupKey, expiry);
+                        // Packet bytes are identical across all N packets in the burst —
+                        // build once and reuse.
+                        const keepalive = {
+                            ...opts.keepalive,
+                            version: opts.keepalive.version ??
+                                (announcement.productName && V3_KEEPALIVE_PRODUCTS.has(announcement.productName)
+                                    ? "3.0"
+                                    : "2.0"),
+                        };
+                        // Surface the announced PID and the chosen keepalive version at INFO —
+                        // compatibility reports for unrecognised models hinge on both.
+                        log.info(`Printer announcement received from ${rinfo.address} — seq=${seqHex}, ` +
+                            `product=${announcement.productName ?? "<not reported>"}, raw=${data.toString("hex")}; ` +
+                            `sending burst (keepalive v${keepalive.version})`);
+                        const localIp = await (async () => {
+                            try {
+                                return await (opts.localIpForTarget ?? getLocalIpForTarget)(source);
+                            }
+                            catch (err) {
+                                // No route to the printer (EHOSTUNREACH / ENETUNREACH), most
+                                // likely mid-renumber. Drop the dedup entry so the next
+                                // announcement (sent when the user next opens the panel's scan
+                                // menu — there is no timer) retries instead of skipping this
+                                // seq as a duplicate; the two near-simultaneous duplicates of
+                                // this same announcement have already been skipped by now.
+                                const timer = seenSeqs.get(dedupKey);
+                                if (timer)
+                                    clearTimeout(timer);
+                                seenSeqs.delete(dedupKey);
+                                log.warn(`No local route to ${source} for keepalive (seq=${seqHex}) — skipping burst, will retry on the next announcement`, err);
+                                return null;
+                            }
+                        })();
+                        if (localIp === null)
+                            return;
+                        const packet = buildKeepalivePacket({ ...keepalive, ipAddress: localIp }, announcement.seq);
+                        const lastOctet = parseInt((localIp.split(".")[3] ?? "230"), 10);
+                        const slotIdx = Math.max(0, (Number.isNaN(lastOctet) ? 0 : lastOctet - 230) % 10);
+                        const staggerMs = 20 + slotIdx * 140;
+                        const intervalMs = 420;
+                        const totalBursts = 5;
+                        const useEphemeralSender = keepalive.version === "3.0";
+                        for (let i = 0; i < totalBursts; i++) {
+                            const burstIndex = i + 1;
+                            const delayMs = staggerMs + i * intervalMs;
+                            const timer = setTimeout(() => {
+                                const burstSocket = useEphemeralSender ? sender : socket;
+                                if (!burstSocket)
+                                    return;
+                                burstSocket.send(packet, opts.printerPort, source, (err) => {
+                                    if (err) {
+                                        log.error(`Keepalive burst send #${burstIndex} failed`, err);
+                                    }
+                                    else {
+                                        log.debug(`Keepalive burst #${burstIndex}/${totalBursts} sent to ${source}:${opts.printerPort} seq=${seqHex} delay=${delayMs}ms`);
+                                    }
+                                });
+                                const idx = pendingTimers.indexOf(timer);
+                                if (idx !== -1)
+                                    pendingTimers.splice(idx, 1);
+                            }, delayMs);
+                            pendingTimers.push(timer);
+                        }
+                    })();
+                });
+                socket.bind(opts.multicastPort, () => {
+                    if (!socket)
+                        return;
+                    try {
+                        const addr = socket.address();
+                        boundPort = typeof addr === "object" ? addr.port : opts.multicastPort;
+                        socket.addMembership(opts.multicastAddress);
+                        log.info(`Keepalive responder listening on ${opts.multicastAddress}:${opts.multicastPort} — waiting for printer announcements`);
+                        resolve();
+                    }
+                    catch (err) {
+                        reject(err instanceof Error ? err : new Error(String(err)));
+                    }
+                });
+            });
+        },
+        stop() {
+            // Cancel any pending burst timers
+            for (const t of pendingTimers)
+                clearTimeout(t);
+            pendingTimers.length = 0;
+            // Cancel any pending dedup-window expiries
+            for (const t of seenSeqs.values())
+                clearTimeout(t);
+            seenSeqs.clear();
+            // Cancel any pending rejected-peer warn throttles
+            for (const t of warnedPeers.values())
+                clearTimeout(t);
+            warnedPeers.clear();
+            if (socket) {
+                try {
+                    socket.dropMembership(opts.multicastAddress);
+                }
+                catch {
+                    // socket may already be closed — ignore
+                }
+                socket.close();
+                socket = null;
+            }
+            if (sender) {
+                sender.close();
+                sender = null;
+            }
+            log.info("Keepalive responder stopped");
+        },
+    };
+}

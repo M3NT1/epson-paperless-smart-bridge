@@ -1,0 +1,64 @@
+# ==============================================================================
+# EPSON XP-610 SZKENNER ÉS PAPERLESS-NGX INTEGRÁCIÓ
+# ==============================================================================
+
+rest_command:
+  paperless_scan_finish:
+    url: http://192.168.0.32:3006/api/scan/finish
+    method: POST
+    timeout: 30
+
+  paperless_scan_clear:
+    url: http://192.168.0.32:3006/api/scan/clear
+    method: POST
+    timeout: 10
+
+sensor:
+  - platform: rest
+    name: Paperless Szkenner Puffer
+    unique_id: paperless_szkenner_puffer_status
+    resource: http://192.168.0.32:3006/api/scan/status
+    scan_interval: 3
+    value_template: >-
+      {% if value_json is defined and value_json.count is defined %}
+        {% if value_json.count == 0 %}
+          Üres
+        {% else %}
+          {{ value_json.count }} oldal
+        {% endif %}
+      {% else %}
+        Elérhetetlen
+      {% endif %}
+    icon: mdi:scanner
+    json_attributes:
+      - count
+      - status
+      - pages
+      - timestamp
+
+automation:
+  - id: paperless_scan_finish_on_button
+    alias: Paperless Szkenner - Dokumentum lezárása gombnyomásra
+    description: Amikor megnyomják a lezárás gombot, összefűzi és beküldi a várakozó lapokat
+    trigger:
+      - platform: state
+        entity_id: input_button.paperless_dokumentum_lezarasa
+    action:
+      - service: rest_command.paperless_scan_finish
+      - delay: 1
+      - service: homeassistant.update_entity
+        target:
+          entity_id: sensor.paperless_szkenner_puffer
+
+  - id: paperless_scan_clear_on_button
+    alias: Paperless Szkenner - Puffer ürítése gombnyomásra
+    description: Törli a várakozó oldalakat a pufferből
+    trigger:
+      - platform: state
+        entity_id: input_button.paperless_puffer_uritese
+    action:
+      - service: rest_command.paperless_scan_clear
+      - delay: 1
+      - service: homeassistant.update_entity
+        target:
+          entity_id: sensor.paperless_szkenner_puffer

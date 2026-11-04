@@ -1,0 +1,41 @@
+# Secrets & Local Environment
+.env
+.env.local
+*.secret
+*.token
+
+# Mount points & Data symlinks
+unraid_dokumentumok
+unraid_dokumentumok/*
+data/
+media/
+export/
+scratch/
+pgdata/
+redis/
+thumbnails/
+staging/
+consume/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# Logs & temp files
+*.log
+*.tmp
+*.pdf
+*.jpg
+*.png
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

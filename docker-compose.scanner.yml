@@ -1,0 +1,92 @@
+services:
+  # 1. Epson Szkenner Profil: 1 oldal Azonnal (Egyoldalas azonnali beküldés)
+  epson-scan-single:
+    image: ghcr.io/mtheuma/epson2paperless:latest
+    container_name: epson-scan-single
+    restart: unless-stopped
+    stop_grace_period: 150s
+    mac_address: "02:42:c0:a8:00:e6"
+    environment:
+      - PRINTER_IP=192.168.0.90
+      - SCAN_DEST_NAME=1 oldal Azonnal
+      - SCAN_DEST_ID=02
+      - SCAN_FORMAT=pdf
+      - SCAN_SIDES=simplex
+      - SCAN_COLOR_MODE=auto
+      - SCAN_RESOLUTION=300
+      - POST_PROCESS=document
+      - TZ=Europe/Budapest
+      - LOG_LEVEL=debug
+      - HEALTH_PORT=3000
+    volumes:
+      - /mnt/hermes-workdir/DOKUMENTUMOK/01_BEOLVASAS_IDE/00_Automata_AI_Kategorizalas:/output
+      - /home/menti/HAZ/PAPIRDIGITALOZALAS/patches/registry.js:/app/dist/esci/dialects/registry.js:ro
+      - /home/menti/HAZ/PAPIRDIGITALOZALAS/patches/keepalive.js:/app/dist/keepalive.js:ro
+    networks:
+      scanner_lan:
+        ipv4_address: 192.168.0.230
+
+  # 2. Epson Szkenner Profil: + Oldal hozzaad (Többoldalas gyűjtő)
+  epson-scan-page:
+    image: ghcr.io/mtheuma/epson2paperless:latest
+    container_name: epson-scan-page
+    restart: unless-stopped
+    stop_grace_period: 150s
+    mac_address: "02:42:c0:a8:00:e7"
+    environment:
+      - PRINTER_IP=192.168.0.90
+      - SCAN_DEST_NAME=+ Oldal hozzaad
+      - SCAN_DEST_ID=02
+      - SCAN_FORMAT=pdf
+      - SCAN_SIDES=simplex
+      - SCAN_COLOR_MODE=auto
+      - SCAN_RESOLUTION=300
+      - POST_PROCESS=document
+      - TZ=Europe/Budapest
+      - LOG_LEVEL=debug
+      - HEALTH_PORT=3000
+    volumes:
+      - /mnt/hermes-workdir/DOKUMENTUMOK/_SZKENNER_PUFFER/pages:/output
+      - /home/menti/HAZ/PAPIRDIGITALOZALAS/patches/registry.js:/app/dist/esci/dialects/registry.js:ro
+      - /home/menti/HAZ/PAPIRDIGITALOZALAS/patches/keepalive.js:/app/dist/keepalive.js:ro
+    networks:
+      scanner_lan:
+        ipv4_address: 192.168.0.231
+
+  # 3. Epson Szkenner Profil: KESZ Utolso lap (Lezárás és összefűzés)
+  epson-scan-finish:
+    image: ghcr.io/mtheuma/epson2paperless:latest
+    container_name: epson-scan-finish
+    restart: unless-stopped
+    stop_grace_period: 150s
+    mac_address: "02:42:c0:a8:00:e8"
+    environment:
+      - PRINTER_IP=192.168.0.90
+      - SCAN_DEST_NAME=KESZ Utolso lap
+      - SCAN_DEST_ID=02
+      - SCAN_FORMAT=pdf
+      - SCAN_SIDES=simplex
+      - SCAN_COLOR_MODE=auto
+      - SCAN_RESOLUTION=300
+      - POST_PROCESS=document
+      - TZ=Europe/Budapest
+      - LOG_LEVEL=debug
+      - HEALTH_PORT=3000
+    volumes:
+      - /mnt/hermes-workdir/DOKUMENTUMOK/_SZKENNER_PUFFER/finish:/output
+      - /home/menti/HAZ/PAPIRDIGITALOZALAS/patches/registry.js:/app/dist/esci/dialects/registry.js:ro
+      - /home/menti/HAZ/PAPIRDIGITALOZALAS/patches/keepalive.js:/app/dist/keepalive.js:ro
+    networks:
+      scanner_lan:
+        ipv4_address: 192.168.0.232
+
+networks:
+  scanner_lan:
+    name: scanner_lan
+    driver: macvlan
+    driver_opts:
+      parent: ens18
+    ipam:
+      config:
+        - subnet: 192.168.0.0/24
+          gateway: 192.168.0.1

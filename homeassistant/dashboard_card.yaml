@@ -1,0 +1,52 @@
+# Home Assistant Lovelace Dashboard Card (Mushroom + Grid + Entities)
+type: vertical-stack
+cards:
+  - type: custom:mushroom-template-card
+    primary: Epson XP-610 Szkenner
+    secondary: "Puffer: {{ states('sensor.paperless_szkenner_puffer') }}"
+    icon: mdi:scanner
+    icon_color: >-
+      {% set st = states('sensor.paperless_szkenner_puffer') %}
+      {% if st not in ['Üres', '0 oldal', 'unavailable', 'unknown', 'Elérhetetlen'] %}orange{% else %}blue{% endif %}
+    layout: horizontal
+
+  - type: grid
+    columns: 2
+    square: false
+    cards:
+      - type: custom:mushroom-template-card
+        layout: vertical
+        primary: Befejezés
+        secondary: Összefűzés & Küldés
+        icon: mdi:file-check
+        icon_color: green
+        tap_action:
+          action: call-service
+          service: input_button.press
+          target:
+            entity_id: input_button.paperless_dokumentum_lezarasa
+
+      - type: custom:mushroom-template-card
+        layout: vertical
+        primary: Mégse
+        secondary: Puffer törlése
+        icon: mdi:trash-can-outline
+        icon_color: red
+        tap_action:
+          action: call-service
+          service: input_button.press
+          target:
+            entity_id: input_button.paperless_puffer_uritese
+
+  - type: entities
+    show_header_toggle: false
+    entities:
+      - entity: sensor.paperless_szkenner_puffer
+        name: Pufferelt oldalak száma
+        icon: mdi:scanner
+      - entity: input_button.paperless_dokumentum_lezarasa
+        name: Dokumentum lezárása és beküldése
+        icon: mdi:file-check
+      - entity: input_button.paperless_puffer_uritese
+        name: Puffer törlése (Mégse)
+        icon: mdi:trash-can-outline
