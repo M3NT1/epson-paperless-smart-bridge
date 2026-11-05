@@ -2,7 +2,7 @@ title: Szkenner & Nyomtató
 views:
 - title: Vezérlés
   path: vezerles
-  icon: mdi:printer-scanner
+  icon: mdi:printer
   cards:
   - type: custom:mushroom-template-card
     primary: Epson XP-610 Papírdigitalizáló
