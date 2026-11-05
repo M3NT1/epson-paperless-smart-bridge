@@ -1036,11 +1036,39 @@ def process_and_sync(client: PaperlessClient, exported_cache: dict[int, str]):
     catalog_entries = []
     any_updated = False
 
-    for doc in documents:
+    # Legmagasabb meglévő ASN (Archive Serial Number / Irattári sorszám) lekérése
+    current_max_asn = 0
+    try:
+        resp = client.request("GET", "/api/documents/?archive_serial_number__isnull=false&ordering=-archive_serial_number&page_size=1")
+        results = resp.get("results", []) if isinstance(resp, dict) else []
+        if results and results[0].get("archive_serial_number"):
+            current_max_asn = int(results[0]["archive_serial_number"])
+    except Exception as e:
+        log(f"  ! Legmagasabb ASN sorszám lekérési hiba: {e}")
+
+    # Rendezzük a dokumentumokat hozzáadás/ID szerint növekvő sorrendbe az ASN sorszámozás folytonosságához
+    sorted_docs = sorted(documents, key=lambda d: (d.get("added") or "", d.get("id") or 0))
+
+    for doc in sorted_docs:
         doc_id = doc["id"]
         doc_tags = list(doc.get("tags", []))
         doc_tag_names = [tags_by_id[tid]["name"] for tid in doc_tags if tid in tags_by_id]
         content = (doc.get("content") or "").strip()
+
+        orig_fn = (doc.get("original_file_name") or "").lower()
+        is_epson_scan = (
+            orig_fn.startswith("scan_")
+            or orig_fn.startswith("szkennelt_")
+            or "szkennelt" in orig_fn
+            or "epson" in orig_fn
+        ) and not orig_fn.startswith("mail_")
+
+        # Ha Epson szkennerből származik és még nincs hozzárendelve ASN irattári sorszám
+        assigned_new_asn = None
+        if is_epson_scan and not doc.get("archive_serial_number"):
+            current_max_asn += 1
+            assigned_new_asn = current_max_asn
+            doc["archive_serial_number"] = assigned_new_asn
 
         if ai_tag_id and ai_tag_id not in doc_tags:
             log(f"AI elemzés indítása a(z) #{doc_id} dokumentumon ({doc.get('original_file_name')})...")
@@ -1062,6 +1090,9 @@ def process_and_sync(client: PaperlessClient, exported_cache: dict[int, str]):
                 ai_meta_path.write_text(json.dumps(ai_meta_store, ensure_ascii=False, indent=2), encoding="utf-8")
 
                 patch_data = {}
+                if assigned_new_asn:
+                    patch_data["archive_serial_number"] = assigned_new_asn
+                    log(f"  -> Epson szkenner észlelve: Új ASN sorszám #{assigned_new_asn} hozzárendelve a(z) #{doc_id} dokumentumhoz!")
 
                 new_title = (ai_res.get("title") or "").strip()
                 if new_title:
@@ -1199,6 +1230,14 @@ def process_and_sync(client: PaperlessClient, exported_cache: dict[int, str]):
                 log(f"  -> #{doc_id} sikeresen frissítve a Paperless-ben ({provider_used})!")
             except Exception as e:
                 log(f"  ! AI feldolgozási hiba #{doc_id} dokumentumnál: {e}")
+        elif assigned_new_asn:
+            # Már korábban AI által feldolgozott Epson dokumentum utólagos sorszámozása
+            try:
+                doc = client.request("PATCH", f"/api/documents/{doc_id}/", {"archive_serial_number": assigned_new_asn})
+                any_updated = True
+                log(f"  -> Epson szkenner észlelve: Utólagos ASN sorszám #{assigned_new_asn} mentve a(z) #{doc_id} dokumentumhoz ({doc.get('title')})!")
+            except Exception as ae:
+                log(f"  ! Hiba az ASN #{assigned_new_asn} mentésekor #{doc_id} dokumentumnál: {ae}")
 
         dt_id = doc.get("document_type")
         dt_name = doc_types_by_id.get(dt_id, {}).get("name") if dt_id else "Kategorizálatlan"
@@ -1247,7 +1286,7 @@ def process_and_sync(client: PaperlessClient, exported_cache: dict[int, str]):
             },
         }
 
-        mod_sig = f"{doc.get('modified')}_{dt_name}_{doc.get('title')}_{len(cf_readable)}"
+        mod_sig = f"{doc.get('modified')}_{dt_name}_{doc.get('title')}_{len(cf_readable)}_{doc.get('archive_serial_number')}"
         if exported_cache.get(doc_id) != mod_sig:
             flat_path = JSON_OUTPUT_DIR / "osszes" / f"{doc_id:05d}.json"
             flat_path.write_text(json.dumps(doc_json, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1276,6 +1315,7 @@ def process_and_sync(client: PaperlessClient, exported_cache: dict[int, str]):
                 "category": dt_name,
                 "correspondent": corr_name,
                 "tags": tag_names,
+                "archive_serial_number": doc.get("archive_serial_number"),
                 "custom_fields": cf_readable,
                 "json_file": f"osszes/{doc_id:05d}.json",
                 "archive_pdf": doc_json["paths"]["unraid_archive_pdf"],
