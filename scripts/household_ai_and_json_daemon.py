@@ -207,6 +207,37 @@ def ensure_consume_folders():
 # EPSON TÖBBOLDALAS SZKENNER PUFFER ÉS ÖSSZEFŰZŐ LOGIKA (NINCS TIMEOUT!)
 # ============================================================================
 
+LAST_EPSON_SCAN_FILE = JSON_OUTPUT_DIR / "last_epson_scan.json"
+LAST_GMAIL_SYNC_FILE = JSON_OUTPUT_DIR / "last_gmail_sync.json"
+_last_buffer_action = "Készenlétben"
+
+
+def load_last_epson_scan() -> dict:
+    try:
+        if LAST_EPSON_SCAN_FILE.exists():
+            return json.loads(LAST_EPSON_SCAN_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def save_last_epson_scan(data: dict):
+    try:
+        JSON_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        LAST_EPSON_SCAN_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        log(f"Hiba a last_epson_scan.json mentésekor: {e}")
+
+
+def load_last_gmail_sync() -> dict:
+    try:
+        if LAST_GMAIL_SYNC_FILE.exists():
+            return json.loads(LAST_GMAIL_SYNC_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
 def get_staging_status() -> dict:
     with _staging_lock:
         pages = []
@@ -215,15 +246,29 @@ def get_staging_status() -> dict:
         if STAGING_FINISH_DIR.exists():
             pages += [f.name for f in STAGING_FINISH_DIR.iterdir() if f.is_file() and not f.name.startswith(".")]
         count = len(pages)
+        last_scan = load_last_epson_scan()
+        gmail_sync = load_last_gmail_sync()
         return {
             "count": count,
             "status": f"{count} oldal várakozik" if count > 0 else "Üres",
             "pages": sorted(pages),
+            "last_action": _last_buffer_action,
+            "last_scan_id": last_scan.get("id"),
+            "last_scan_asn": last_scan.get("asn"),
+            "last_scan_title": last_scan.get("title"),
+            "last_scan_category": last_scan.get("category"),
+            "last_scan_correspondent": last_scan.get("correspondent"),
+            "last_scan_amount": last_scan.get("amount"),
+            "last_scan_at": last_scan.get("processed_at"),
+            "last_scan_url": last_scan.get("paperless_url"),
+            "gmail_last_sync_at": gmail_sync.get("completed_at"),
+            "gmail_last_ingested": gmail_sync.get("ingested_pdfs", 0),
             "timestamp": datetime.datetime.now().isoformat(),
         }
 
 
 def clear_multipage_buffer() -> dict:
+    global _last_buffer_action
     with _staging_lock:
         deleted = 0
         for d in [STAGING_PAGES_DIR, STAGING_FINISH_DIR]:
@@ -235,8 +280,88 @@ def clear_multipage_buffer() -> dict:
                             deleted += 1
                         except Exception:
                             pass
-        log(f"[Szkenner Puffer] Puffer kiürítve ({deleted} oldal törölve).")
-        return {"status": "cleared", "deleted_files": deleted}
+        _last_buffer_action = f"Puffer kiürítve ({deleted} oldal törölve)"
+        log(f"[Szkenner Puffer] {_last_buffer_action}.")
+        return {"status": "cleared", "deleted_files": deleted, "message": _last_buffer_action}
+
+
+def pop_last_page_from_buffer() -> dict:
+    global _last_buffer_action
+    with _staging_lock:
+        if not STAGING_PAGES_DIR.exists():
+            _last_buffer_action = "A puffer üres (nincs törölhető oldal)"
+            return {"status": "empty", "message": _last_buffer_action}
+        pages = sorted(
+            [f for f in STAGING_PAGES_DIR.iterdir() if f.is_file() and not f.name.startswith(".")],
+            key=lambda x: x.name,
+        )
+        if not pages:
+            _last_buffer_action = "A puffer üres (nincs törölhető oldal)"
+            return {"status": "empty", "message": _last_buffer_action}
+        last_file = pages[-1]
+        name = last_file.name
+        last_file.unlink()
+        remaining = len(pages) - 1
+        _last_buffer_action = f"Utolsó (#{len(pages)}.) oldal törölve ({remaining} maradt)"
+        log(f"[Szkenner Puffer] {_last_buffer_action}: {name}")
+        return {"status": "popped", "deleted": name, "remaining": remaining, "message": _last_buffer_action}
+
+
+def swap_last_two_pages_in_buffer() -> dict:
+    global _last_buffer_action
+    with _staging_lock:
+        if not STAGING_PAGES_DIR.exists():
+            _last_buffer_action = "Legalább 2 oldal szükséges a cseréhez"
+            return {"status": "not_enough_pages", "message": _last_buffer_action}
+        pages = sorted(
+            [f for f in STAGING_PAGES_DIR.iterdir() if f.is_file() and not f.name.startswith(".")],
+            key=lambda x: x.name,
+        )
+        if len(pages) < 2:
+            _last_buffer_action = f"Csak {len(pages)} oldal van a pufferben (min. 2 kell)"
+            return {"status": "not_enough_pages", "message": _last_buffer_action}
+        p1, p2 = pages[-2], pages[-1]
+        b1 = p1.read_bytes()
+        b2 = p2.read_bytes()
+        p1.write_bytes(b2)
+        p2.write_bytes(b1)
+        _last_buffer_action = f"Utolsó 2 oldal (#{len(pages)-1} ↔ #{len(pages)}) felcserélve"
+        log(f"[Szkenner Puffer] {_last_buffer_action}: {p1.name} <-> {p2.name}")
+        return {"status": "swapped", "page_a": p1.name, "page_b": p2.name, "message": _last_buffer_action}
+
+
+def rotate_last_page_in_buffer() -> dict:
+    global _last_buffer_action
+    with _staging_lock:
+        if not STAGING_PAGES_DIR.exists():
+            _last_buffer_action = "A puffer üres (nincs forgatható oldal)"
+            return {"status": "empty", "message": _last_buffer_action}
+        pages = sorted(
+            [f for f in STAGING_PAGES_DIR.iterdir() if f.is_file() and not f.name.startswith(".")],
+            key=lambda x: x.name,
+        )
+        if not pages:
+            _last_buffer_action = "A puffer üres (nincs forgatható oldal)"
+            return {"status": "empty", "message": _last_buffer_action}
+        target_pdf = pages[-1]
+        try:
+            import pypdf
+            reader = pypdf.PdfReader(str(target_pdf))
+            writer = pypdf.PdfWriter()
+            for pg in reader.pages:
+                pg.rotate(180)
+                writer.add_page(pg)
+            tmp_pdf = target_pdf.with_suffix(".rot.pdf")
+            with open(tmp_pdf, "wb") as f_out:
+                writer.write(f_out)
+            tmp_pdf.replace(target_pdf)
+            _last_buffer_action = f"Utolsó (#{len(pages)}.) oldal 180°-kal elforgatva"
+            log(f"[Szkenner Puffer] {_last_buffer_action}: {target_pdf.name}")
+            return {"status": "rotated", "page": target_pdf.name, "message": _last_buffer_action}
+        except Exception as e:
+            _last_buffer_action = f"Forgatási hiba: {e}"
+            log(f"[Szkenner Puffer] Hiba a forgatáskor: {e}")
+            return {"status": "error", "error": str(e), "message": _last_buffer_action}
 
 
 def merge_multipage_batch() -> dict:
@@ -314,6 +439,8 @@ def merge_multipage_batch() -> dict:
             except Exception:
                 pass
 
+            global _last_buffer_action
+            _last_buffer_action = f"{page_count} oldal összefűzve és beküldve ({out_filename})"
             log(f"[Szkenner Összefűző] SIKERES ÖSSZEFŰZÉS: {page_count} oldal -> {out_filename}")
             return {
                 "status": "success",
@@ -561,6 +688,18 @@ class OpenAIOAuthProxyHandler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/scan/clear":
             res = clear_multipage_buffer()
+            self._send_json(200, res)
+            return
+        if self.path == "/api/scan/pop":
+            res = pop_last_page_from_buffer()
+            self._send_json(200, res)
+            return
+        if self.path == "/api/scan/swap":
+            res = swap_last_two_pages_in_buffer()
+            self._send_json(200, res)
+            return
+        if self.path == "/api/scan/rotate":
+            res = rotate_last_page_in_buffer()
             self._send_json(200, res)
             return
         if "/chat/completions" not in self.path:
@@ -1285,6 +1424,25 @@ def process_and_sync(client: PaperlessClient, exported_cache: dict[int, str]):
                 ),
             },
         }
+
+        doc_asn = doc.get("archive_serial_number")
+        if is_epson_scan and doc_asn:
+            prev_last = load_last_epson_scan()
+            prev_asn = prev_last.get("asn") or 0
+            if assigned_new_asn or int(doc_asn) >= int(prev_asn):
+                new_last_scan = {
+                    "id": doc_id,
+                    "asn": int(doc_asn),
+                    "title": doc.get("title") or doc.get("original_file_name"),
+                    "category": dt_name,
+                    "correspondent": corr_name or "Ismeretlen",
+                    "amount": cf_readable.get("Összeg") or (f"{cf_readable.get('Összeg (Ft)')} Ft" if cf_readable.get("Összeg (Ft)") else None),
+                    "created_date": created_str,
+                    "processed_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S") if assigned_new_asn else (prev_last.get("processed_at") or created_str),
+                    "paperless_url": f"{PAPERLESS_PUBLIC_URL}/documents/{doc_id}/details",
+                }
+                if new_last_scan != prev_last:
+                    save_last_epson_scan(new_last_scan)
 
         mod_sig = f"{doc.get('modified')}_{dt_name}_{doc.get('title')}_{len(cf_readable)}_{doc.get('archive_serial_number')}"
         if exported_cache.get(doc_id) != mod_sig:

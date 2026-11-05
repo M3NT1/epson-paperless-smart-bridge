@@ -1,118 +1,178 @@
 title: Szkenner & Nyomtató
 views:
-- title: Vezérlés
-  path: vezerles
-  icon: mdi:printer
-  cards:
-  - type: custom:mushroom-template-card
-    primary: Epson XP-610 Papírdigitalizáló
-    secondary: '{% set st = states("sensor.paperless_szkenner_puffer") %}{% if st
-      in ["Üres", "0 oldal", "unavailable", "unknown"] %}Puffer üres · Készen áll
-      a szkennelésre{% else %}Pufferben: {{ st }} · Összefűzésre vár!{% endif %}'
-    icon: mdi:scanner
+- cards:
+  - icon: mdi:scanner
     icon_color: '{% set st = states("sensor.paperless_szkenner_puffer") %}{% if st
       not in ["Üres", "0 oldal", "unavailable", "unknown"] %}orange{% else %}green{%
       endif %}'
     layout: horizontal
+    primary: Epson XP-610 Papírdigitalizáló
+    secondary: '{% set st = states("sensor.paperless_szkenner_puffer") %}{% set act
+      = state_attr("sensor.paperless_szkenner_puffer", "last_action") %}{% if st in
+      ["Üres", "0 oldal", "unavailable", "unknown"] %}Puffer üres · {{ act or "Készen
+      áll" }}{% else %}Pufferben: {{ st }} · {{ act or "Összefűzésre vár!" }}{% endif
+      %}'
     tap_action:
       action: url
       url_path: http://192.168.0.32:8010/
-  - type: grid
-    columns: 2
-    square: false
-    cards:
-    - type: custom:mushroom-template-card
+    type: custom:mushroom-template-card
+  - icon: mdi:numeric-{{ state_attr("sensor.paperless_szkenner_puffer", "last_scan_asn")
+      or "1" }}-box-multiple-outline
+    icon_color: amber
+    layout: horizontal
+    multiline_secondary: true
+    primary: '🏷️ Írd a papírra: ASN #{{ state_attr("sensor.paperless_szkenner_puffer",
+      "last_scan_asn") or "-" }}'
+    secondary: '📄 {{ state_attr("sensor.paperless_szkenner_puffer", "last_scan_title")
+      or "Még nincs szkennelt irat" }}
+
+      📁 {{ state_attr("sensor.paperless_szkenner_puffer", "last_scan_category") or
+      "-" }}{% if state_attr("sensor.paperless_szkenner_puffer", "last_scan_amount")
+      %} · 💰 {{ state_attr("sensor.paperless_szkenner_puffer", "last_scan_amount")
+      }}{% endif %}'
+    tap_action:
+      action: url
+      url_path: http://192.168.0.32:8010/documents
+    type: custom:mushroom-template-card
+  - cards:
+    - icon: mdi:file-check
+      icon_color: green
       layout: vertical
       primary: Befejezés
       secondary: Összefűzés & Küldés
-      icon: mdi:file-check
-      icon_color: green
       tap_action:
         action: call-service
         service: input_button.press
         target:
           entity_id: input_button.paperless_dokumentum_lezarasa
-    - type: custom:mushroom-template-card
+      type: custom:mushroom-template-card
+    - icon: mdi:trash-can-outline
+      icon_color: red
       layout: vertical
       primary: Mégse
       secondary: Puffer kiürítése
-      icon: mdi:trash-can-outline
-      icon_color: red
+      tap_action:
+        action: call-service
+        confirmation:
+          text: Biztosan törölni szeretnéd az összes várakozó oldalt a pufferből?
+        service: input_button.press
+        target:
+          entity_id: input_button.paperless_puffer_uritese
+      type: custom:mushroom-template-card
+    columns: 2
+    square: false
+    type: grid
+  - cards:
+    - icon: mdi:file-undo-outline
+      icon_color: deep-orange
+      layout: vertical
+      primary: Utolsó törlése
+      secondary: Elrontott lap ↩️
       tap_action:
         action: call-service
         service: input_button.press
-        confirmation:
-          text: Biztosan törölni szeretnéd a beolvasott, összefűzetlen oldalakat a
-            pufferből?
         target:
-          entity_id: input_button.paperless_puffer_uritese
-  - type: entities
-    title: 🖨️ Szkenner & Puffer Állapot
-    show_header_toggle: false
-    entities:
-    - entity: sensor.paperless_szkenner_puffer
-      name: Pufferelt oldalak száma
-      icon: mdi:layers-outline
-    - entity: input_button.paperless_dokumentum_lezarasa
-      name: Dokumentum lezárása és beküldése
-      icon: mdi:file-check
-    - entity: input_button.paperless_puffer_uritese
-      name: Puffer törlése (Mégse)
-      icon: mdi:trash-can-outline
-  - type: grid
-    columns: 2
+          entity_id: input_button.paperless_utolso_lap_torlese
+      type: custom:mushroom-template-card
+    - icon: mdi:swap-horizontal
+      icon_color: cyan
+      layout: vertical
+      primary: Utolsó 2 cseréje
+      secondary: Elő-/hátoldal 🔀
+      tap_action:
+        action: call-service
+        service: input_button.press
+        target:
+          entity_id: input_button.paperless_utolso_2_lap_csereje
+      type: custom:mushroom-template-card
+    - icon: mdi:rotate-right
+      icon_color: indigo
+      layout: vertical
+      primary: 180° Forgatás
+      secondary: Fejjel lefelé 🔄
+      tap_action:
+        action: call-service
+        service: input_button.press
+        target:
+          entity_id: input_button.paperless_utolso_lap_forgatasa
+      type: custom:mushroom-template-card
+    columns: 3
     square: false
-    cards:
-    - type: custom:mushroom-template-card
+    type: grid
+  - entities:
+    - entity: sensor.paperless_szkenner_puffer
+      icon: mdi:layers-outline
+      name: Pufferelt oldalak száma
+    - entity: input_button.paperless_dokumentum_lezarasa
+      icon: mdi:file-check
+      name: Dokumentum lezárása és beküldése
+    - entity: input_button.paperless_utolso_lap_torlese
+      icon: mdi:file-undo-outline
+      name: Utolsó beszkennelt lap törlése
+    - entity: input_button.paperless_utolso_2_lap_csereje
+      icon: mdi:swap-horizontal
+      name: Utolsó 2 oldal sorrendjének cseréje
+    - entity: input_button.paperless_utolso_lap_forgatasa
+      icon: mdi:rotate-right
+      name: Utolsó oldal 180°-os forgatása
+    - entity: input_button.paperless_puffer_uritese
+      icon: mdi:trash-can-outline
+      name: Teljes puffer ürítése (Mégse)
+    show_header_toggle: false
+    title: 🖨️ Szkenner & Puffer Vezérlőlista
+    type: entities
+  - icon: mdi:email-sync-outline
+    icon_color: teal
+    layout: horizontal
+    primary: Automata Gmail Számlabetakarító (6 óránként)
+    secondary: 'Utolsó szinkron: {{ state_attr("sensor.paperless_szkenner_puffer",
+      "gmail_last_sync_at") or "Nincs adat" }} · Új PDF: {{ state_attr("sensor.paperless_szkenner_puffer",
+      "gmail_last_ingested") or 0 }} db (ASN nélkül)'
+    tap_action:
+      action: url
+      url_path: http://192.168.0.32:8010/documents
+    type: custom:mushroom-template-card
+  - cards:
+    - icon: mdi:file-document-multiple-outline
+      icon_color: blue
       layout: horizontal
       primary: Paperless-ngx
       secondary: Dokumentumtár (8010)
-      icon: mdi:file-document-multiple-outline
-      icon_color: blue
       tap_action:
         action: url
         url_path: http://192.168.0.32:8010/
-    - type: custom:mushroom-template-card
+      type: custom:mushroom-template-card
+    - icon: mdi:printer
+      icon_color: purple
       layout: horizontal
       primary: Epson XP-610
       secondary: Web Config (.90)
-      icon: mdi:printer
-      icon_color: purple
       tap_action:
         action: url
         url_path: http://192.168.0.90/
-  - type: markdown
+      type: custom:mushroom-template-card
+    columns: 2
+    square: false
+    type: grid
+  - content: "### \U0001F4C4 Többoldalas dokumentum szkennelése:\n1. Helyezd a lapot\
+      \ a síkágyra.\n2. A nyomtató kijelzőjén válaszd: **`+ Oldal hozzaad`**.\n3.\
+      \ A következő oldalaknál szintén nyomd meg a **`+ Oldal hozzaad`** opciót.\n\
+      4. **Javítás szkennelés közben (ha szükséges):**\n   * **↩️ Utolsó törlése:**\
+      \ Ha rossz lapot tettél be, csak az utolsó beszkennelt oldalt dobja el (a többi\
+      \ megmarad!).\n   * **\U0001F500 Utolsó 2 cseréje:** Ha kétoldalas lapnál felcserélted\
+      \ az elő- és hátoldalt, megfordítja a sorrendjüket.\n   * **\U0001F504 180°\
+      \ Forgatás:** Ha fejjel lefelé tetted a lapot az üvegre, 180°-kal elforgatja\
+      \ az utolsó oldalt.\n5. Az utolsó oldalnál válaszd a **`KESZ Utolso lap`** menüpontot\
+      \ a nyomtatón (vagy nyomd meg a fenti zöld **Befejezés** gombot).\n\n---\n###\
+      \ ⚡ Egyoldalas azonnali szkennelés:\n* A nyomtató kijelzőjén válaszd: **`1 oldal\
+      \ Azonnal`**.\n\n---\n### \U0001F3F7️ Automatikus Irattári Sorszámozás (ASN)\
+      \ & iPhone Értesítés:\n* Minden Epson-nal beolvasott fizikai papír automatikusan\
+      \ kap egy növekvő **#ASN sorszámot**, amiről **azonnali iPhone értesítést**\
+      \ is kapsz.\n* Írd rá a számot a papír jobb felső sarkára, és tedd a gyűjtődobozba!\n\
+      * Az e-mailben érkező (6 óránként automatikusan betakarított) digitális számlák\
+      \ **nem** kapnak ASN számot."
     title: 📖 Szkennelési Útmutató
-    content: '### 📄 Többoldalas dokumentum szkennelése:
-
-      1. Helyezd a lapot a síkágyra.
-
-      2. A nyomtató kijelzőjén válaszd: **`+ Oldal hozzaad`**.
-
-      3. A következő oldalaknál szintén nyomd meg a **`+ Oldal hozzaad`** opciót.
-
-      4. Az utolsó oldalnál válaszd a **`KESZ Utolso lap`** menüpontot a nyomtatón
-      (vagy nyomd meg a fenti zöld **Befejezés** gombot).
-
-      5. A rendszer automatikusan összefűzi és továbbítja a Paperless-be!
-
-
-      ---
-
-      ### ⚡ Egyoldalas azonnali szkennelés:
-
-      * A nyomtató kijelzőjén válaszd: **`1 oldal Azonnal`**.
-
-      * Az oldal azonnal bekerül a Paperless-be és elindul az AI feldolgozás.
-
-
-      ---
-
-      ### 🏷️ Irattári Sorszámozás (ASN):
-
-      * Minden Epson-nal beolvasott fizikai papír automatikusan kap egy növekvő **#ASN
-      sorszámot**.
-
-      * Ezt írd rá a papírra ceruzával, és tedd a fizikai dossziéba!
-
-      * Az e-mailben érkező digitális számlák nem kapnak sorszámot.'
+    type: markdown
+  icon: mdi:printer
+  path: vezerles
+  title: Vezérlés

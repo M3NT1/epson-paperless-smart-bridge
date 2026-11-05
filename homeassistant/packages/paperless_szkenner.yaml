@@ -13,6 +13,34 @@ rest_command:
     method: POST
     timeout: 10
 
+  paperless_scan_pop:
+    url: http://192.168.0.32:3006/api/scan/pop
+    method: POST
+    timeout: 10
+
+  paperless_scan_swap:
+    url: http://192.168.0.32:3006/api/scan/swap
+    method: POST
+    timeout: 10
+
+  paperless_scan_rotate:
+    url: http://192.168.0.32:3006/api/scan/rotate
+    method: POST
+    timeout: 15
+
+input_button:
+  paperless_utolso_lap_torlese:
+    name: Utolsó oldal törlése a pufferből
+    icon: mdi:file-undo-outline
+
+  paperless_utolso_2_lap_csereje:
+    name: Utolsó 2 oldal felcserélése
+    icon: mdi:swap-horizontal
+
+  paperless_utolso_lap_forgatasa:
+    name: Utolsó oldal 180° forgatása
+    icon: mdi:rotate-right
+
 sensor:
   - platform: rest
     name: Paperless Szkenner Puffer
@@ -34,6 +62,17 @@ sensor:
       - count
       - status
       - pages
+      - last_action
+      - last_scan_id
+      - last_scan_asn
+      - last_scan_title
+      - last_scan_category
+      - last_scan_correspondent
+      - last_scan_amount
+      - last_scan_at
+      - last_scan_url
+      - gmail_last_sync_at
+      - gmail_last_ingested
       - timestamp
 
 automation:
@@ -62,3 +101,69 @@ automation:
       - service: homeassistant.update_entity
         target:
           entity_id: sensor.paperless_szkenner_puffer
+
+  - id: paperless_scan_pop_on_button
+    alias: Paperless Szkenner - Utolsó lap törlése gombnyomásra
+    description: Törli a legutoljára beszkennelt oldalt a pufferből
+    trigger:
+      - platform: state
+        entity_id: input_button.paperless_utolso_lap_torlese
+    action:
+      - service: rest_command.paperless_scan_pop
+      - delay: 1
+      - service: homeassistant.update_entity
+        target:
+          entity_id: sensor.paperless_szkenner_puffer
+
+  - id: paperless_scan_swap_on_button
+    alias: Paperless Szkenner - Utolsó 2 lap cseréje gombnyomásra
+    description: Felcseréli az utolsó 2 beszkennelt oldal sorrendjét a pufferben
+    trigger:
+      - platform: state
+        entity_id: input_button.paperless_utolso_2_lap_csereje
+    action:
+      - service: rest_command.paperless_scan_swap
+      - delay: 1
+      - service: homeassistant.update_entity
+        target:
+          entity_id: sensor.paperless_szkenner_puffer
+
+  - id: paperless_scan_rotate_on_button
+    alias: Paperless Szkenner - Utolsó lap 180° forgatása gombnyomásra
+    description: 180 fokkal elforgatja az utolsó beszkennelt oldalt a pufferben
+    trigger:
+      - platform: state
+        entity_id: input_button.paperless_utolso_lap_forgatasa
+    action:
+      - service: rest_command.paperless_scan_rotate
+      - delay: 1
+      - service: homeassistant.update_entity
+        target:
+          entity_id: sensor.paperless_szkenner_puffer
+
+  - id: paperless_scan_new_asn_iphone_notification
+    alias: Paperless Szkenner - Új ASN Sorszám Értesítés iPhone-ra
+    description: Azonnali értesítést küld az iPhone-ra az új Epson szkennelés ASN sorszámával
+    trigger:
+      - platform: state
+        entity_id: sensor.paperless_szkenner_puffer
+        attribute: last_scan_asn
+    condition:
+      - condition: template
+        value_template: >-
+          {{ trigger.from_state is not none and
+             trigger.to_state is not none and
+             trigger.from_state.attributes.get('last_scan_asn') is not none and
+             trigger.to_state.attributes.get('last_scan_asn') is not none and
+             (trigger.to_state.attributes.get('last_scan_asn') | int(0)) > (trigger.from_state.attributes.get('last_scan_asn') | int(0)) }}
+    action:
+      - service: notify.mobile_app_mentiphone2
+        data:
+          title: "🏷️ Írd a papírra: ASN #{{ state_attr('sensor.paperless_szkenner_puffer', 'last_scan_asn') }}"
+          message: >-
+            📄 {{ state_attr('sensor.paperless_szkenner_puffer', 'last_scan_title') }}
+            📁 {{ state_attr('sensor.paperless_szkenner_puffer', 'last_scan_category') }}{% if state_attr('sensor.paperless_szkenner_puffer', 'last_scan_amount') %} • 💰 {{ state_attr('sensor.paperless_szkenner_puffer', 'last_scan_amount') }}{% endif %}
+          data:
+            url: "{{ state_attr('sensor.paperless_szkenner_puffer', 'last_scan_url') }}"
+            push:
+              sound: default

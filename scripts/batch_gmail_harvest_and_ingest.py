@@ -210,7 +210,44 @@ def parse_date_to_sort_key(date_str: str) -> str:
         return "1970-01-01_000000"
 
 
+def fetch_live_candidates(mail: imaplib.IMAP4_SSL, days: int = 14) -> list[dict]:
+    """Közvetlen IMAP keresés az elmúlt N nap PDF-mellékletes leveleire (X-GM-RAW)."""
+    query = f'"has:attachment filename:pdf newer_than:{days}d"'
+    log(f"Élő Gmail IMAP keresés indítása: {query}...")
+    typ, data = mail.search(None, "X-GM-RAW", query)
+    if typ != "OK" or not data or not data[0]:
+        return []
+    msg_ids = [mid.decode("utf-8") if isinstance(mid, bytes) else str(mid) for mid in data[0].split()]
+    log(f"Talált PDF-mellékletes levelek az elmúlt {days} napból: {len(msg_ids)} db")
+    headers_list = []
+    for mid in msg_ids:
+        try:
+            res, h_data = mail.fetch(mid, "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])")
+            if res != "OK" or not h_data or not isinstance(h_data[0], tuple):
+                continue
+            hdr_msg = email.message_from_bytes(h_data[0][1])
+            subj = decode_str(hdr_msg.get("Subject", ""))
+            sender = decode_str(hdr_msg.get("From", ""))
+            date_str = decode_str(hdr_msg.get("Date", ""))
+            headers_list.append({
+                "id": mid,
+                "subject": subj,
+                "from": sender,
+                "date": date_str,
+                "attachments": ["attachment.pdf"],
+            })
+        except Exception as e:
+            log(f"  Fejléc lekérdezési hiba #{mid}: {e}")
+    return headers_list
+
+
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Gmail PDF Számla Betakarító")
+    parser.add_argument("--live", action="store_true", help="Élő IMAP keresés az elmúlt N nap leveleire (nem a statikus fejlécfájlból)")
+    parser.add_argument("--days", type=int, default=14, help="Hány napra visszamenőleg keressen élő módban (alapértelmezett: 14)")
+    args, _ = parser.parse_known_args()
+
     log("================================================================================")
     log("GMAIL TELJES DOKUMENTUM BETAKARÍTÓ ÉS BEOLVASÓ PIPELINE INDÍTÁSA")
     log("================================================================================")
@@ -224,12 +261,16 @@ def main():
     existing_db_checksums = get_paperless_existing_checksums()
     log(f"Paperless adatbázisban már meglévő dokumentumok: {len(existing_db_checksums)} db")
 
-    if not HEADERS_FILE.exists():
-        log("Nem található a .gmail_pdf_headers.json fájl! Kérlek futtasd a fejléc-letöltőt.")
-        sys.exit(1)
+    user, pwd = get_gmail_credentials()
+    log(f"IMAP csatlakozás a(z) {user} fiókhoz...")
+    mail = connect_imap(user, pwd)
+    log("IMAP kapcsolat sikeresen felépült!")
 
-    headers_data = json.loads(HEADERS_FILE.read_text(encoding="utf-8"))
-    log(f"Összes PDF-et tartalmazó email a fiókban: {len(headers_data)} db")
+    if args.live or not HEADERS_FILE.exists():
+        headers_data = fetch_live_candidates(mail, days=args.days)
+    else:
+        headers_data = json.loads(HEADERS_FILE.read_text(encoding="utf-8"))
+        log(f"Összes PDF-et tartalmazó email a fiókban: {len(headers_data)} db")
 
     candidates = []
     for h in headers_data:
@@ -242,11 +283,6 @@ def main():
     # Legújabbaktól a legrégebbiek felé (2026 -> 2008)
     candidates.sort(key=lambda x: x["sort_key"], reverse=True)
     log(f"Kiválasztott releváns számla/rezsi/jótállás/megrendelés emailek: {len(candidates)} db")
-
-    user, pwd = get_gmail_credentials()
-    log(f"IMAP csatlakozás a(z) {user} fiókhoz...")
-    mail = connect_imap(user, pwd)
-    log("IMAP kapcsolat sikeresen felépült!")
 
     batch_size = int(os.environ.get("BATCH_SIZE", DEFAULT_BATCH_SIZE))
     limit = int(os.environ.get("LIMIT", "0"))
@@ -417,31 +453,39 @@ def main():
     log(f"Kihagyott már meglévő PDF: {skipped_count} db")
     log("Várakozás a háttérben futó OCR és Háztartási AI folyamatok teljes lefutására...")
 
-    final_wait_start = time.time()
-    while True:
-        remaining_consume = len(list(CONSUME_DIR.glob("*.pdf")))
-        unanalyzed = get_paperless_unanalyzed_count()
-        if remaining_consume == 0 and unanalyzed == 0:
-            log("✓ Minden dokumentum sikeresen OCR-ezve, AI-val kategorizálva és JSON-be exportálva!")
-            break
-        log(f"Hátralévő feldolgozandó elemek: {remaining_consume} consume, {unanalyzed} AI elemzésre vár...")
-        trigger_household_agent()
-        time.sleep(12)
-        if time.time() - final_wait_start > 900:
-            log("Időtúllépés a záró várakozásnál, a daemon a háttérben önállóan befejezi a munkát.")
-            break
+    if ingested_count > 0:
+        final_wait_start = time.time()
+        while True:
+            remaining_consume = len(list(CONSUME_DIR.glob("*.pdf")))
+            unanalyzed = get_paperless_unanalyzed_count()
+            if remaining_consume == 0 and unanalyzed == 0:
+                log("✓ Minden dokumentum sikeresen OCR-ezve, AI-val kategorizálva és JSON-be exportálva!")
+                break
+            log(f"Hátralévő feldolgozandó elemek: {remaining_consume} consume, {unanalyzed} AI elemzésre vár...")
+            trigger_household_agent()
+            time.sleep(12)
+            if time.time() - final_wait_start > 180:
+                log("Időtúllépés a záró várakozásnál, a daemon a háttérben önállóan befejezi a munkát.")
+                break
 
     try:
         mail.logout()
     except Exception:
         pass
 
+    now_iso = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     status["status"] = "completed"
-    status["completed_at"] = datetime.datetime.now().isoformat()
+    status["completed_at"] = now_iso
     status["processed_emails"] = total_candidates
     status["ingested_pdfs"] = ingested_count
     status["skipped_existing_pdfs"] = skipped_count
     save_status(status)
+    try:
+        (JSON_OUTPUT_DIR / "last_gmail_sync.json").write_text(
+            json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass
 
     log("================================================================================")
     log("GMAIL PDF PIPELINE TELJESEN ÉS SIKERESEN BEFEJEZŐDÖTT!")
