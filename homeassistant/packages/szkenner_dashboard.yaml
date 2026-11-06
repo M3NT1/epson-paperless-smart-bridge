@@ -16,6 +16,33 @@ views:
       action: url
       url_path: http://192.168.0.32:8010/
     type: custom:mushroom-template-card
+  - icon: mdi:file-eye-outline
+    icon_color: '{% set count = state_attr("sensor.paperless_szkenner_puffer", "count")
+      | int(0) %}{% if count > 0 %}cyan{% else %}grey{% endif %}'
+    layout: horizontal
+    primary: Puffer Előnézet & Lapok Ellenőrzése
+    secondary: '{% set count = state_attr("sensor.paperless_szkenner_puffer", "count")
+      | int(0) %}{% if count > 0 %}🔍 {{ count }} oldal várakozik · Kattints a lapok
+      megtekintéséhez a telefonon!{% else %}Puffer üres · Szkennelés után itt ellenőrizheted
+      a lapokat{% endif %}'
+    tap_action:
+      action: url
+      url_path: http://192.168.0.32:3006/api/scan/preview
+    type: custom:mushroom-template-card
+  - type: conditional
+    conditions:
+    - entity: sensor.paperless_szkenner_puffer
+      state_not: "Üres"
+    - entity: sensor.paperless_szkenner_puffer
+      state_not: "0 oldal"
+    - entity: sensor.paperless_szkenner_puffer
+      state_not: "unavailable"
+    card:
+      type: picture
+      image: http://192.168.0.32:3006/api/scan/page/last/image
+      tap_action:
+        action: url
+        url_path: http://192.168.0.32:3006/api/scan/preview
   - icon: mdi:numeric-{{ state_attr("sensor.paperless_szkenner_puffer", "last_scan_asn")
       or "1" }}-box-multiple-outline
     icon_color: amber
@@ -157,8 +184,9 @@ views:
   - content: "### \U0001F4C4 Többoldalas dokumentum szkennelése:\n1. Helyezd a lapot\
       \ a síkágyra.\n2. A nyomtató kijelzőjén válaszd: **`+ Oldal hozzaad`**.\n3.\
       \ A következő oldalaknál szintén nyomd meg a **`+ Oldal hozzaad`** opciót.\n\
-      4. **Javítás szkennelés közben (ha szükséges):**\n   * **↩️ Utolsó törlése:**\
-      \ Ha rossz lapot tettél be, csak az utolsó beszkennelt oldalt dobja el (a többi\
+      4. **🔍 Ellenőrzés és Javítás szkennelés közben (telefonon):**\n   * **Puffer Előnézet:**\
+      \ Kattints a fenti gombra az összes várakozó lap nagyfelbontású megtekintéséhez!\n\
+      \   * **↩️ Utolsó törlése:** Ha rossz lapot tettél be, csak az utolsó beszkennelt oldalt dobja el (a többi\
       \ megmarad!).\n   * **\U0001F500 Utolsó 2 cseréje:** Ha kétoldalas lapnál felcserélted\
       \ az elő- és hátoldalt, megfordítja a sorrendjüket.\n   * **\U0001F504 180°\
       \ Forgatás:** Ha fejjel lefelé tetted a lapot az üvegre, 180°-kal elforgatja\

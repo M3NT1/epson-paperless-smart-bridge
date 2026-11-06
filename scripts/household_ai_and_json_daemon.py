@@ -61,29 +61,29 @@ STAGING_DIR = Path(os.environ.get("STAGING_DIR", "/staging"))
 STAGING_PAGES_DIR = STAGING_DIR / "pages"
 STAGING_FINISH_DIR = STAGING_DIR / "finish"
 TARGET_CONSUME_DIR = CONSUME_DIR / "00_Automata_AI_Kategorizalas"
-_staging_lock = threading.Lock()
+_staging_lock = threading.RLock()
 
-# pypdf könyvtár dinamikus biztosítása az összefűzéshez
-try:
-    import pypdf
-except ImportError:
+# pypdf, pypdfium2 és pillow dinamikus biztosítása az összefűzéshez és előnézethez
+pypdf_dir = Path("/tmp/pylib")
+pypdf_dir.mkdir(parents=True, exist_ok=True)
+import sys
+if str(pypdf_dir) not in sys.path:
+    sys.path.insert(0, str(pypdf_dir))
+
+for mod_name, pkg_name in [("pypdf", "pypdf"), ("pypdfium2", "pypdfium2"), ("PIL", "pillow")]:
     try:
-        import sys, subprocess
-        pypdf_dir = Path("/tmp/pylib")
-        pypdf_dir.mkdir(parents=True, exist_ok=True)
-        if str(pypdf_dir) not in sys.path:
-            sys.path.insert(0, str(pypdf_dir))
+        __import__(mod_name)
+    except ImportError:
         try:
-            import pypdf
-        except ImportError:
+            import subprocess
             subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", "--no-cache-dir", "--target", str(pypdf_dir), "pypdf"],
+                [sys.executable, "-m", "pip", "install", "--no-cache-dir", "--target", str(pypdf_dir), pkg_name],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
-            import pypdf
-    except Exception as _e:
-        pass
+            __import__(mod_name)
+        except Exception as _e:
+            log(f"Hiba a {pkg_name} dinamikus telepítésekor: {_e}")
 
 # Háztartási mappák a consume könyvtárban
 CONSUME_SUBFOLDERS = [
@@ -236,6 +236,501 @@ def load_last_gmail_sync() -> dict:
     except Exception:
         pass
     return {}
+
+
+def get_buffer_pages() -> list[Path]:
+    with _staging_lock:
+        if not STAGING_PAGES_DIR.exists():
+            return []
+        return sorted(
+            [f for f in STAGING_PAGES_DIR.iterdir() if f.is_file() and not f.name.startswith(".")],
+            key=lambda x: x.name,
+        )
+
+
+def get_empty_placeholder_jpeg(text: str = "A puffer üres") -> bytes:
+    try:
+        import io
+        from PIL import Image, ImageDraw
+        img = Image.new("RGB", (700, 360), color=(26, 28, 30))
+        d = ImageDraw.Draw(img)
+        d.text((40, 160), text, fill=(180, 190, 200))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        return buf.getvalue()
+    except Exception:
+        return b""
+
+
+def render_page_thumbnail(page_path: Path, scale: float = 1.3) -> bytes:
+    try:
+        import io, sys
+        pypdf_dir = Path("/tmp/pylib")
+        if str(pypdf_dir) not in sys.path:
+            sys.path.insert(0, str(pypdf_dir))
+        import pypdfium2 as pdfium
+        pdf = pdfium.PdfDocument(str(page_path))
+        if len(pdf) == 0:
+            raise ValueError("Üres PDF oldal")
+        page = pdf[0]
+        image = page.render(scale=scale).to_pil()
+        buf = io.BytesIO()
+        image.save(buf, format="JPEG", quality=82)
+        return buf.getvalue()
+    except Exception as e:
+        log(f"Előnézet renderelési hiba ({page_path}): {e}")
+        return get_empty_placeholder_jpeg(f"Renderelési hiba: {e}")
+
+
+def get_merged_buffer_pdf() -> bytes:
+    with _staging_lock:
+        pages = get_buffer_pages()
+        import io, pypdf
+        writer = pypdf.PdfWriter()
+        if not pages:
+            writer.add_blank_page(width=595, height=842)
+            buf = io.BytesIO()
+            writer.write(buf)
+            return buf.getvalue()
+        for p in pages:
+            try:
+                reader = pypdf.PdfReader(str(p))
+                for pg in reader.pages:
+                    writer.add_page(pg)
+            except Exception as e:
+                log(f"PDF összefűzési hiba előnézethez ({p.name}): {e}")
+        buf = io.BytesIO()
+        writer.write(buf)
+        return buf.getvalue()
+
+
+def rotate_page_by_index(page_num: int) -> dict:
+    """1-indexed oldal forgatása 180 fokkal."""
+    global _last_buffer_action
+    with _staging_lock:
+        pages = get_buffer_pages()
+        if page_num < 1 or page_num > len(pages):
+            return {"status": "error", "message": f"Érvénytelen oldalszám: {page_num}"}
+        target_pdf = pages[page_num - 1]
+        try:
+            import pypdf
+            reader = pypdf.PdfReader(str(target_pdf))
+            writer = pypdf.PdfWriter()
+            for pg in reader.pages:
+                pg.rotate(180)
+                writer.add_page(pg)
+            tmp_pdf = target_pdf.with_suffix(".rot.pdf")
+            with open(tmp_pdf, "wb") as f_out:
+                writer.write(f_out)
+            tmp_pdf.replace(target_pdf)
+            _last_buffer_action = f"{page_num}. oldal 180°-kal elforgatva"
+            log(f"[Szkenner Puffer] {_last_buffer_action}: {target_pdf.name}")
+            return {"status": "rotated", "page": page_num, "filename": target_pdf.name, "message": _last_buffer_action}
+        except Exception as e:
+            _last_buffer_action = f"Forgatási hiba ({page_num}. oldal): {e}"
+            log(f"[Szkenner Puffer] {e}")
+            return {"status": "error", "error": str(e), "message": _last_buffer_action}
+
+
+def delete_page_by_index(page_num: int) -> dict:
+    """1-indexed oldal törlése."""
+    global _last_buffer_action
+    with _staging_lock:
+        pages = get_buffer_pages()
+        if page_num < 1 or page_num > len(pages):
+            return {"status": "error", "message": f"Érvénytelen oldalszám: {page_num}"}
+        target_pdf = pages[page_num - 1]
+        name = target_pdf.name
+        try:
+            target_pdf.unlink()
+            remaining = len(pages) - 1
+            _last_buffer_action = f"{page_num}. oldal törölve ({remaining} maradt)"
+            log(f"[Szkenner Puffer] {_last_buffer_action}: {name}")
+            return {"status": "deleted", "page": page_num, "deleted_file": name, "remaining": remaining, "message": _last_buffer_action}
+        except Exception as e:
+            _last_buffer_action = f"Törlési hiba ({page_num}. oldal): {e}"
+            log(f"[Szkenner Puffer] {e}")
+            return {"status": "error", "error": str(e), "message": _last_buffer_action}
+
+
+def move_page_by_index(page_num: int, direction: str) -> dict:
+    """1-indexed oldal mozgatása ('up' = előbbre, 'down' = hátrébb)."""
+    global _last_buffer_action
+    with _staging_lock:
+        pages = get_buffer_pages()
+        total = len(pages)
+        if page_num < 1 or page_num > total:
+            return {"status": "error", "message": f"Érvénytelen oldalszám: {page_num}"}
+        idx = page_num - 1
+        if direction == "up" and idx > 0:
+            other_idx = idx - 1
+        elif direction == "down" and idx < total - 1:
+            other_idx = idx + 1
+        else:
+            return {"status": "noop", "message": "Nem mozgatható tovább"}
+
+        p1, p2 = pages[idx], pages[other_idx]
+        b1, b2 = p1.read_bytes(), p2.read_bytes()
+        p1.write_bytes(b2)
+        p2.write_bytes(b1)
+        _last_buffer_action = f"{page_num}. oldal felcserélve ({direction})"
+        log(f"[Szkenner Puffer] {_last_buffer_action}: {p1.name} <-> {p2.name}")
+        return {"status": "moved", "from": page_num, "to": other_idx + 1, "message": _last_buffer_action}
+
+
+def generate_preview_html() -> str:
+    pages = get_buffer_pages()
+    total_pages = len(pages)
+    ts = int(time.time())
+
+    cards_html = []
+    for i, p in enumerate(pages, 1):
+        size_kb = max(1, round(p.stat().st_size / 1024)) if p.exists() else 0
+        up_disabled = "disabled style='opacity:0.3;pointer-events:none;'" if i == 1 else ""
+        down_disabled = "disabled style='opacity:0.3;pointer-events:none;'" if i == total_pages else ""
+
+        card = f"""
+        <div class="page-card" id="page-card-{i}">
+            <div class="page-header">
+                <div class="page-badge">📄 <span>{i}. oldal</span></div>
+                <div class="page-meta">{p.name} · {size_kb} KB</div>
+            </div>
+            <div class="img-wrapper" onclick="openModal('/api/scan/page/{i}/image?t={ts}')">
+                <img src="/api/scan/page/{i}/image?t={ts}" alt="{i}. oldal előnézete" loading="lazy" />
+                <div class="img-zoom-hint">🔍 Nagyítás érintéssel</div>
+            </div>
+            <div class="page-toolbar">
+                <div class="toolbar-group">
+                    <button class="btn btn-secondary" onclick="postAction('/api/scan/page/{i}/rotate')">🔄 180° Forgatás</button>
+                    <button class="btn btn-red" onclick="postAction('/api/scan/page/{i}/delete', 'Biztosan törölni szeretnéd a(z) {i}. oldalt?')">🗑️ Lap törlése</button>
+                </div>
+                <div class="toolbar-group">
+                    <button class="btn btn-secondary btn-icon" {up_disabled} onclick="postAction('/api/scan/page/{i}/move_up')" title="Előbbre mozgatás">⬆️</button>
+                    <button class="btn btn-secondary btn-icon" {down_disabled} onclick="postAction('/api/scan/page/{i}/move_down')" title="Hátrébb mozgatás">⬇️</button>
+                </div>
+            </div>
+        </div>
+        """
+        cards_html.append(card)
+
+    if not cards_html:
+        content_body = """
+        <div class="empty-state">
+            <div class="empty-icon">🖨️</div>
+            <div class="empty-title">A szkenner puffer üres</div>
+            <div class="empty-desc">
+                Helyezz egy dokumentumot az Epson szkenner síkágyára, majd a nyomtató kijelzőjén válaszd a <b>+ Oldal hozzaad</b> opciót a többoldalas gyűjtéshez!
+            </div>
+            <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap;">
+                <button class="btn btn-blue" onclick="location.reload()">🔄 Frissítés</button>
+                <a class="btn btn-secondary" href="http://192.168.0.99:8123/szkenner">⬅️ Vissza a Home Assistanthoz</a>
+            </div>
+        </div>
+        """
+        header_actions = '<a class="btn btn-secondary" href="http://192.168.0.99:8123/szkenner">⬅️ Vissza</a>'
+    else:
+        content_body = f"""
+        <div class="top-actions">
+            <button class="btn btn-green" onclick="postAction('/api/scan/finish', 'Biztosan lezárod és beküldöd mind a(z) {total_pages} oldalt a Paperless-be?')">✅ Befejezés & Beküldés ({total_pages} oldal)</button>
+            <a class="btn btn-blue" href="/api/scan/preview.pdf" target="_blank">📄 Teljes összefűzött PDF</a>
+            <button class="btn btn-secondary" onclick="postAction('/api/scan/clear', 'Biztosan törölni szeretnéd a TELJES puffert?')">🗑️ Puffer ürítése</button>
+            <button class="btn btn-secondary btn-icon" onclick="location.reload()" title="Frissítés">🔄</button>
+        </div>
+        <div class="pages-feed">
+            {''.join(cards_html)}
+        </div>
+        <div style="text-align:center;margin-top:20px;">
+            <button class="btn btn-green" style="padding:14px 24px;font-size:16px;width:100%;max-width:400px;" onclick="postAction('/api/scan/finish', 'Biztosan lezárod és beküldöd mind a(z) {total_pages} oldalt a Paperless-be?')">
+                ✅ Összes oldal összefűzése és beküldése
+            </button>
+        </div>
+        """
+        header_actions = f"""
+        <div style="display:flex;gap:8px;">
+            <button class="btn btn-green" onclick="postAction('/api/scan/finish')">✅ Befejezés</button>
+            <a class="btn btn-secondary" href="http://192.168.0.99:8123/szkenner">⬅️ Vissza</a>
+        </div>
+        """
+
+    return f"""<!DOCTYPE html>
+<html lang="hu">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+    <title>Szkenner Puffer Előnézet ({total_pages} oldal)</title>
+    <style>
+        :root {{
+            --bg: #111114;
+            --card-bg: #1c1c1e;
+            --card-sub: #2c2c2e;
+            --border: #38383a;
+            --accent: #2196f3;
+            --green: #34c759;
+            --red: #ff3b30;
+            --orange: #ff9500;
+            --text: #ffffff;
+            --text-muted: #8e8e93;
+        }}
+        * {{ box-sizing: border-box; -webkit-tap-highlight-color: transparent; }}
+        body {{
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            padding-bottom: 60px;
+        }}
+        .header {{
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            background: rgba(28, 28, 30, 0.90);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border-bottom: 1px solid var(--border);
+            padding: 12px 16px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }}
+        .header-title {{
+            font-size: 17px;
+            font-weight: 700;
+            margin: 0;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }}
+        .header-subtitle {{
+            font-size: 12px;
+            color: var(--text-muted);
+            margin: 2px 0 0 0;
+        }}
+        .btn {{
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            padding: 9px 14px;
+            border-radius: 10px;
+            font-size: 14px;
+            font-weight: 600;
+            border: none;
+            cursor: pointer;
+            text-decoration: none;
+            transition: transform 0.1s, opacity 0.1s;
+        }}
+        .btn:active {{ transform: scale(0.96); opacity: 0.85; }}
+        .btn-green {{ background: var(--green); color: #fff; }}
+        .btn-blue {{ background: var(--accent); color: #fff; }}
+        .btn-red {{ background: var(--red); color: #fff; }}
+        .btn-secondary {{ background: var(--card-sub); color: var(--text); }}
+        .btn-icon {{ padding: 8px 12px; font-size: 16px; }}
+
+        .container {{
+            max-width: 760px;
+            margin: 0 auto;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }}
+        .top-actions {{
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            align-items: center;
+        }}
+        .pages-feed {{
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }}
+        .page-card {{
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            overflow: hidden;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+        }}
+        .page-header {{
+            padding: 12px 16px;
+            background: var(--card-sub);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid var(--border);
+        }}
+        .page-badge {{
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-weight: 700;
+            font-size: 15px;
+        }}
+        .page-meta {{
+            font-size: 12px;
+            color: var(--text-muted);
+        }}
+        .img-wrapper {{
+            position: relative;
+            background: #000;
+            text-align: center;
+            min-height: 250px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: zoom-in;
+            padding: 8px;
+        }}
+        .img-wrapper img {{
+            max-width: 100%;
+            height: auto;
+            max-height: 75vh;
+            border-radius: 4px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.5);
+        }}
+        .img-zoom-hint {{
+            position: absolute;
+            bottom: 12px;
+            right: 12px;
+            background: rgba(0,0,0,0.65);
+            color: #fff;
+            padding: 4px 8px;
+            border-radius: 6px;
+            font-size: 11px;
+            backdrop-filter: blur(4px);
+        }}
+        .page-toolbar {{
+            padding: 10px 12px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            flex-wrap: wrap;
+            background: var(--card-bg);
+            border-top: 1px solid var(--border);
+        }}
+        .toolbar-group {{
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }}
+        .empty-state {{
+            text-align: center;
+            padding: 50px 20px;
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            margin-top: 10px;
+        }}
+        .empty-icon {{ font-size: 54px; margin-bottom: 12px; }}
+        .empty-title {{ font-size: 20px; font-weight: 700; margin-bottom: 8px; }}
+        .empty-desc {{ color: var(--text-muted); font-size: 14px; max-width: 440px; margin: 0 auto 24px; line-height: 1.5; }}
+
+        .modal {{
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.95);
+            z-index: 999;
+            justify-content: center;
+            align-items: center;
+            padding: 10px;
+        }}
+        .modal.active {{ display: flex; }}
+        .modal img {{ max-width: 100%; max-height: 100%; object-fit: contain; }}
+        .modal-close {{
+            position: absolute;
+            top: 16px; right: 16px;
+            background: rgba(255,255,255,0.25);
+            color: #fff;
+            border: none;
+            border-radius: 50%;
+            width: 44px; height: 44px;
+            font-size: 24px;
+            cursor: pointer;
+        }}
+        .toast {{
+            position: fixed;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #323236;
+            color: #fff;
+            padding: 10px 20px;
+            border-radius: 24px;
+            font-size: 14px;
+            font-weight: 600;
+            box-shadow: 0 4px 14px rgba(0,0,0,0.6);
+            z-index: 1000;
+            opacity: 0;
+            transition: opacity 0.25s;
+            pointer-events: none;
+        }}
+        .toast.show {{ opacity: 1; }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="header-left">
+            <div>
+                <h1 class="header-title">📄 Szkenner Puffer Előnézet</h1>
+                <div class="header-subtitle">{total_pages} oldal várakozik · Élő ellenőrzés</div>
+            </div>
+        </div>
+        {header_actions}
+    </div>
+
+    <div class="container">
+        {content_body}
+    </div>
+
+    <div class="modal" id="imageModal" onclick="closeModal()">
+        <button class="modal-close" onclick="closeModal()">&times;</button>
+        <img id="modalImg" src="" alt="Nagyított oldal" />
+    </div>
+
+    <div class="toast" id="toast"></div>
+
+    <script>
+        function showToast(msg) {{
+            const t = document.getElementById('toast');
+            t.innerText = msg;
+            t.classList.add('show');
+            setTimeout(() => t.classList.remove('show'), 2000);
+        }}
+
+        async function postAction(url, confirmText) {{
+            if (confirmText && !confirm(confirmText)) return;
+            try {{
+                const res = await fetch(url, {{ method: 'POST' }});
+                const data = await res.json();
+                if (data.message) showToast(data.message);
+                if (url.includes('/finish')) {{
+                    setTimeout(() => {{
+                        window.location.href = 'http://192.168.0.99:8123/szkenner';
+                    }}, 1200);
+                }} else {{
+                    setTimeout(() => location.reload(), 400);
+                }}
+            }} catch (e) {{
+                alert('Műveleti hiba: ' + e);
+            }}
+        }}
+
+        function openModal(src) {{
+            document.getElementById('modalImg').src = src;
+            document.getElementById('imageModal').classList.add('active');
+        }}
+
+        function closeModal() {{
+            document.getElementById('imageModal').classList.remove('active');
+        }}
+    </script>
+</body>
+</html>
+"""
 
 
 def get_staging_status() -> dict:
@@ -658,6 +1153,53 @@ class OpenAIOAuthProxyHandler(BaseHTTPRequestHandler):
         if self.path == "/api/scan/status":
             self._send_json(200, get_staging_status())
             return
+        if self.path.startswith("/api/scan/preview.pdf"):
+            pdf_bytes = get_merged_buffer_pdf()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/pdf")
+            self.send_header("Content-Disposition", 'inline; filename="szkenner_elonezet.pdf"')
+            self.send_header("Content-Length", str(len(pdf_bytes)))
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate, max-age=0")
+            self.end_headers()
+            self.wfile.write(pdf_bytes)
+            return
+        if self.path in ("/api/scan/preview", "/preview") or self.path.startswith("/api/scan/preview?"):
+            html_content = generate_preview_html()
+            raw_html = html_content.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(raw_html)))
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate, max-age=0")
+            self.end_headers()
+            self.wfile.write(raw_html)
+            return
+        if self.path.startswith("/api/scan/page/"):
+            clean_path = self.path.split("?")[0].strip("/")
+            parts = clean_path.split("/")
+            if len(parts) >= 5 and parts[-1] == "image":
+                target = parts[3]
+                pages = get_buffer_pages()
+                if not pages:
+                    img_bytes = get_empty_placeholder_jpeg("A puffer üres")
+                else:
+                    if target == "last":
+                        target_page = pages[-1]
+                    else:
+                        try:
+                            idx = int(target) - 1
+                            if idx < 0 or idx >= len(pages):
+                                idx = 0
+                            target_page = pages[idx]
+                        except ValueError:
+                            target_page = pages[-1]
+                    img_bytes = render_page_thumbnail(target_page)
+                self.send_response(200)
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(len(img_bytes)))
+                self.send_header("Cache-Control", "no-cache, no-store, must-revalidate, max-age=0")
+                self.end_headers()
+                self.wfile.write(img_bytes)
+                return
         if self.path.startswith("/v1/models") or self.path.startswith("/models"):
             models = [CODEX_MODEL, "gpt-6-luna", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4-mini"]
             seen = []
@@ -702,6 +1244,34 @@ class OpenAIOAuthProxyHandler(BaseHTTPRequestHandler):
             res = rotate_last_page_in_buffer()
             self._send_json(200, res)
             return
+        if self.path.startswith("/api/scan/page/"):
+            clean_path = self.path.split("?")[0].strip("/")
+            parts = clean_path.split("/")
+            if len(parts) >= 5:
+                target = parts[3]
+                action = parts[4]
+                pages = get_buffer_pages()
+                try:
+                    target_num = len(pages) if target == "last" else int(target)
+                    if action == "rotate":
+                        res = rotate_page_by_index(target_num)
+                        self._send_json(200, res)
+                        return
+                    elif action == "delete":
+                        res = delete_page_by_index(target_num)
+                        self._send_json(200, res)
+                        return
+                    elif action in ("move_up", "up"):
+                        res = move_page_by_index(target_num, "up")
+                        self._send_json(200, res)
+                        return
+                    elif action in ("move_down", "down"):
+                        res = move_page_by_index(target_num, "down")
+                        self._send_json(200, res)
+                        return
+                except Exception as pe:
+                    self._send_json(500, {"status": "error", "message": str(pe)})
+                    return
         if "/chat/completions" not in self.path:
             self._send_json(404, {"error": {"message": f"Unsupported endpoint: {self.path}"}})
             return
