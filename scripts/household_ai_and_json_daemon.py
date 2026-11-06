@@ -240,12 +240,11 @@ def load_last_gmail_sync() -> dict:
 
 def get_buffer_pages() -> list[Path]:
     with _staging_lock:
-        if not STAGING_PAGES_DIR.exists():
-            return []
-        return sorted(
-            [f for f in STAGING_PAGES_DIR.iterdir() if f.is_file() and not f.name.startswith(".")],
-            key=lambda x: x.name,
-        )
+        pages = []
+        for d in [STAGING_PAGES_DIR, STAGING_FINISH_DIR]:
+            if d.exists():
+                pages.extend([f for f in d.iterdir() if f.is_file() and not f.name.startswith(".")])
+        return sorted(pages, key=lambda x: x.name)
 
 
 def get_empty_placeholder_jpeg(text: str = "A puffer üres") -> bytes:
@@ -264,11 +263,16 @@ def get_empty_placeholder_jpeg(text: str = "A puffer üres") -> bytes:
 
 def render_page_thumbnail(page_path: Path, scale: float = 1.3) -> bytes:
     try:
-        import io, sys
+        import io, sys, time
         pypdf_dir = Path("/tmp/pylib")
         if str(pypdf_dir) not in sys.path:
             sys.path.insert(0, str(pypdf_dir))
         import pypdfium2 as pdfium
+        # Várakozás, ha a szkenner még épp írja a fájlt a NAS-ra
+        for _ in range(6):
+            if page_path.exists() and page_path.stat().st_size > 1000:
+                break
+            time.sleep(0.25)
         pdf = pdfium.PdfDocument(str(page_path))
         if len(pdf) == 0:
             raise ValueError("Üres PDF oldal")
@@ -279,7 +283,7 @@ def render_page_thumbnail(page_path: Path, scale: float = 1.3) -> bytes:
         return buf.getvalue()
     except Exception as e:
         log(f"Előnézet renderelési hiba ({page_path}): {e}")
-        return get_empty_placeholder_jpeg(f"Renderelési hiba: {e}")
+        return get_empty_placeholder_jpeg(f"Előnézet betöltése... ({e})")
 
 
 def get_merged_buffer_pdf() -> bytes:
@@ -783,13 +787,7 @@ def clear_multipage_buffer() -> dict:
 def pop_last_page_from_buffer() -> dict:
     global _last_buffer_action
     with _staging_lock:
-        if not STAGING_PAGES_DIR.exists():
-            _last_buffer_action = "A puffer üres (nincs törölhető oldal)"
-            return {"status": "empty", "message": _last_buffer_action}
-        pages = sorted(
-            [f for f in STAGING_PAGES_DIR.iterdir() if f.is_file() and not f.name.startswith(".")],
-            key=lambda x: x.name,
-        )
+        pages = get_buffer_pages()
         if not pages:
             _last_buffer_action = "A puffer üres (nincs törölhető oldal)"
             return {"status": "empty", "message": _last_buffer_action}
@@ -805,13 +803,7 @@ def pop_last_page_from_buffer() -> dict:
 def swap_last_two_pages_in_buffer() -> dict:
     global _last_buffer_action
     with _staging_lock:
-        if not STAGING_PAGES_DIR.exists():
-            _last_buffer_action = "Legalább 2 oldal szükséges a cseréhez"
-            return {"status": "not_enough_pages", "message": _last_buffer_action}
-        pages = sorted(
-            [f for f in STAGING_PAGES_DIR.iterdir() if f.is_file() and not f.name.startswith(".")],
-            key=lambda x: x.name,
-        )
+        pages = get_buffer_pages()
         if len(pages) < 2:
             _last_buffer_action = f"Csak {len(pages)} oldal van a pufferben (min. 2 kell)"
             return {"status": "not_enough_pages", "message": _last_buffer_action}
@@ -828,13 +820,7 @@ def swap_last_two_pages_in_buffer() -> dict:
 def rotate_last_page_in_buffer() -> dict:
     global _last_buffer_action
     with _staging_lock:
-        if not STAGING_PAGES_DIR.exists():
-            _last_buffer_action = "A puffer üres (nincs forgatható oldal)"
-            return {"status": "empty", "message": _last_buffer_action}
-        pages = sorted(
-            [f for f in STAGING_PAGES_DIR.iterdir() if f.is_file() and not f.name.startswith(".")],
-            key=lambda x: x.name,
-        )
+        pages = get_buffer_pages()
         if not pages:
             _last_buffer_action = "A puffer üres (nincs forgatható oldal)"
             return {"status": "empty", "message": _last_buffer_action}

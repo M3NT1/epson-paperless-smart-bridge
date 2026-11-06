@@ -38,8 +38,12 @@ views:
     - entity: sensor.paperless_szkenner_puffer
       state_not: "unavailable"
     card:
-      type: picture
-      image: http://192.168.0.32:3006/api/scan/page/last/image
+      type: picture-entity
+      entity: camera.192_168_0_32
+      name: Utolsó beszkennelt lap
+      show_name: false
+      show_state: false
+      camera_view: auto
       tap_action:
         action: url
         url_path: http://192.168.0.32:3006/api/scan/preview
