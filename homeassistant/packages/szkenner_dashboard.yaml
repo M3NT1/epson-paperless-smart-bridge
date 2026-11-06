@@ -117,6 +117,17 @@ views:
           entity_id: input_button.paperless_utolso_2_lap_csereje
       type: custom:mushroom-template-card
     - icon: mdi:rotate-right
+      icon_color: purple
+      layout: vertical
+      primary: 90° Forgatás
+      secondary: Álló / Fekvő ↷
+      tap_action:
+        action: call-service
+        service: input_button.press
+        target:
+          entity_id: input_button.paperless_utolso_lap_forgatasa_90
+      type: custom:mushroom-template-card
+    - icon: mdi:rotate-3d-variant
       icon_color: indigo
       layout: vertical
       primary: 180° Forgatás
@@ -127,7 +138,7 @@ views:
         target:
           entity_id: input_button.paperless_utolso_lap_forgatasa
       type: custom:mushroom-template-card
-    columns: 3
+    columns: 2
     square: false
     type: grid
   - entities:
@@ -143,9 +154,12 @@ views:
     - entity: input_button.paperless_utolso_2_lap_csereje
       icon: mdi:swap-horizontal
       name: Utolsó 2 oldal sorrendjének cseréje
-    - entity: input_button.paperless_utolso_lap_forgatasa
+    - entity: input_button.paperless_utolso_lap_forgatasa_90
       icon: mdi:rotate-right
-      name: Utolsó oldal 180°-os forgatása
+      name: Utolsó oldal 90°-os forgatása (Álló/Fekvő)
+    - entity: input_button.paperless_utolso_lap_forgatasa
+      icon: mdi:rotate-3d-variant
+      name: Utolsó oldal 180°-os forgatása (Fejjel lefelé)
     - entity: input_button.paperless_puffer_uritese
       icon: mdi:trash-can-outline
       name: Teljes puffer ürítése (Mégse)
@@ -192,9 +206,10 @@ views:
       \ Kattints a fenti gombra az összes várakozó lap nagyfelbontású megtekintéséhez!\n\
       \   * **↩️ Utolsó törlése:** Ha rossz lapot tettél be, csak az utolsó beszkennelt oldalt dobja el (a többi\
       \ megmarad!).\n   * **\U0001F500 Utolsó 2 cseréje:** Ha kétoldalas lapnál felcserélted\
-      \ az elő- és hátoldalt, megfordítja a sorrendjüket.\n   * **\U0001F504 180°\
-      \ Forgatás:** Ha fejjel lefelé tetted a lapot az üvegre, 180°-kal elforgatja\
-      \ az utolsó oldalt.\n5. Az utolsó oldalnál válaszd a **`KESZ Utolso lap`** menüpontot\
+      \ az elő- és hátoldalt, megfordítja a sorrendjüket.\n   * **↷ 90° Forgatás:**\
+      \ Ha fektetve tetted a lapot az üvegre, 90°-kal jobbra forgatja az utolsó oldalt.\n\
+      \   * **\U0001F504 180° Forgatás:** Ha fejjel lefelé tetted a lapot az üvegre,\
+      \ 180°-kal elforgatja az utolsó oldalt.\n5. Az utolsó oldalnál válaszd a **`KESZ Utolso lap`** menüpontot\
       \ a nyomtatón (vagy nyomd meg a fenti zöld **Befejezés** gombot).\n\n---\n###\
       \ ⚡ Egyoldalas azonnali szkennelés:\n* A nyomtató kijelzőjén válaszd: **`1 oldal\
       \ Azonnal`**.\n\n---\n### \U0001F3F7️ Automatikus Irattári Sorszámozás (ASN)\

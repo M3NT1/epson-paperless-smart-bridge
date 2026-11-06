@@ -308,8 +308,8 @@ def get_merged_buffer_pdf() -> bytes:
         return buf.getvalue()
 
 
-def rotate_page_by_index(page_num: int) -> dict:
-    """1-indexed oldal forgatása 180 fokkal."""
+def rotate_page_by_index(page_num: int, degrees: int = 90) -> dict:
+    """1-indexed oldal forgatása megadott fokkal (alapértelmezett: 90 fok)."""
     global _last_buffer_action
     with _staging_lock:
         pages = get_buffer_pages()
@@ -321,15 +321,15 @@ def rotate_page_by_index(page_num: int) -> dict:
             reader = pypdf.PdfReader(str(target_pdf))
             writer = pypdf.PdfWriter()
             for pg in reader.pages:
-                pg.rotate(180)
+                pg.rotate(degrees)
                 writer.add_page(pg)
             tmp_pdf = target_pdf.with_suffix(".rot.pdf")
             with open(tmp_pdf, "wb") as f_out:
                 writer.write(f_out)
             tmp_pdf.replace(target_pdf)
-            _last_buffer_action = f"{page_num}. oldal 180°-kal elforgatva"
+            _last_buffer_action = f"{page_num}. oldal {degrees}°-kal elforgatva"
             log(f"[Szkenner Puffer] {_last_buffer_action}: {target_pdf.name}")
-            return {"status": "rotated", "page": page_num, "filename": target_pdf.name, "message": _last_buffer_action}
+            return {"status": "rotated", "page": page_num, "degrees": degrees, "filename": target_pdf.name, "message": _last_buffer_action}
         except Exception as e:
             _last_buffer_action = f"Forgatási hiba ({page_num}. oldal): {e}"
             log(f"[Szkenner Puffer] {e}")
@@ -405,7 +405,8 @@ def generate_preview_html() -> str:
             </div>
             <div class="page-toolbar">
                 <div class="toolbar-group">
-                    <button class="btn btn-secondary" onclick="postAction('/api/scan/page/{i}/rotate')">🔄 180° Forgatás</button>
+                    <button class="btn btn-secondary" onclick="postAction('/api/scan/page/{i}/rotate?degrees=90')" title="90° elforgatás jobbra">↷ 90° Forgatás</button>
+                    <button class="btn btn-secondary" onclick="postAction('/api/scan/page/{i}/rotate?degrees=180')" title="180° elforgatás (fejjel lefelé)">🔄 180°</button>
                     <button class="btn btn-red" onclick="postAction('/api/scan/page/{i}/delete', 'Biztosan törölni szeretnéd a(z) {i}. oldalt?')">🗑️ Lap törlése</button>
                 </div>
                 <div class="toolbar-group">
@@ -817,7 +818,7 @@ def swap_last_two_pages_in_buffer() -> dict:
         return {"status": "swapped", "page_a": p1.name, "page_b": p2.name, "message": _last_buffer_action}
 
 
-def rotate_last_page_in_buffer() -> dict:
+def rotate_last_page_in_buffer(degrees: int = 90) -> dict:
     global _last_buffer_action
     with _staging_lock:
         pages = get_buffer_pages()
@@ -830,15 +831,15 @@ def rotate_last_page_in_buffer() -> dict:
             reader = pypdf.PdfReader(str(target_pdf))
             writer = pypdf.PdfWriter()
             for pg in reader.pages:
-                pg.rotate(180)
+                pg.rotate(degrees)
                 writer.add_page(pg)
             tmp_pdf = target_pdf.with_suffix(".rot.pdf")
             with open(tmp_pdf, "wb") as f_out:
                 writer.write(f_out)
             tmp_pdf.replace(target_pdf)
-            _last_buffer_action = f"Utolsó (#{len(pages)}.) oldal 180°-kal elforgatva"
+            _last_buffer_action = f"Utolsó (#{len(pages)}.) oldal {degrees}°-kal elforgatva"
             log(f"[Szkenner Puffer] {_last_buffer_action}: {target_pdf.name}")
-            return {"status": "rotated", "page": target_pdf.name, "message": _last_buffer_action}
+            return {"status": "rotated", "degrees": degrees, "page": target_pdf.name, "message": _last_buffer_action}
         except Exception as e:
             _last_buffer_action = f"Forgatási hiba: {e}"
             log(f"[Szkenner Puffer] Hiba a forgatáskor: {e}")
@@ -1226,8 +1227,21 @@ class OpenAIOAuthProxyHandler(BaseHTTPRequestHandler):
             res = swap_last_two_pages_in_buffer()
             self._send_json(200, res)
             return
-        if self.path == "/api/scan/rotate":
-            res = rotate_last_page_in_buffer()
+        if self.path.startswith("/api/scan/rotate"):
+            deg = 90
+            if "degrees=180" in self.path or self.path.endswith("_180"):
+                deg = 180
+            elif "degrees=270" in self.path or self.path.endswith("_270"):
+                deg = 270
+            elif "degrees=" in self.path:
+                try:
+                    import urllib.parse
+                    qs = urllib.parse.urlparse(self.path).query
+                    params = urllib.parse.parse_qs(qs)
+                    deg = int(params.get("degrees", [90])[0])
+                except Exception:
+                    deg = 90
+            res = rotate_last_page_in_buffer(degrees=deg)
             self._send_json(200, res)
             return
         if self.path.startswith("/api/scan/page/"):
@@ -1239,8 +1253,21 @@ class OpenAIOAuthProxyHandler(BaseHTTPRequestHandler):
                 pages = get_buffer_pages()
                 try:
                     target_num = len(pages) if target == "last" else int(target)
-                    if action == "rotate":
-                        res = rotate_page_by_index(target_num)
+                    if action.startswith("rotate"):
+                        deg = 90
+                        if "degrees=180" in self.path or action.endswith("_180"):
+                            deg = 180
+                        elif "degrees=270" in self.path or action.endswith("_270"):
+                            deg = 270
+                        elif "degrees=" in self.path:
+                            try:
+                                import urllib.parse
+                                qs = urllib.parse.urlparse(self.path).query
+                                params = urllib.parse.parse_qs(qs)
+                                deg = int(params.get("degrees", [90])[0])
+                            except Exception:
+                                deg = 90
+                        res = rotate_page_by_index(target_num, degrees=deg)
                         self._send_json(200, res)
                         return
                     elif action == "delete":

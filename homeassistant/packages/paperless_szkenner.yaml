@@ -23,8 +23,13 @@ rest_command:
     method: POST
     timeout: 10
 
+  paperless_scan_rotate_90:
+    url: http://192.168.0.32:3006/api/scan/rotate?degrees=90
+    method: POST
+    timeout: 15
+
   paperless_scan_rotate:
-    url: http://192.168.0.32:3006/api/scan/rotate
+    url: http://192.168.0.32:3006/api/scan/rotate?degrees=180
     method: POST
     timeout: 15
 
@@ -37,9 +42,13 @@ input_button:
     name: Utolsó 2 oldal felcserélése
     icon: mdi:swap-horizontal
 
+  paperless_utolso_lap_forgatasa_90:
+    name: Utolsó oldal 90° forgatása
+    icon: mdi:rotate-right
+
   paperless_utolso_lap_forgatasa:
     name: Utolsó oldal 180° forgatása
-    icon: mdi:rotate-right
+    icon: mdi:rotate-3d-variant
 
 sensor:
   - platform: rest
@@ -123,6 +132,19 @@ automation:
         entity_id: input_button.paperless_utolso_2_lap_csereje
     action:
       - service: rest_command.paperless_scan_swap
+      - delay: 1
+      - service: homeassistant.update_entity
+        target:
+          entity_id: sensor.paperless_szkenner_puffer
+
+  - id: paperless_scan_rotate_90_on_button
+    alias: Paperless Szkenner - Utolsó lap 90° forgatása gombnyomásra
+    description: 90 fokkal elforgatja az utolsó beszkennelt oldalt a pufferben
+    trigger:
+      - platform: state
+        entity_id: input_button.paperless_utolso_lap_forgatasa_90
+    action:
+      - service: rest_command.paperless_scan_rotate_90
       - delay: 1
       - service: homeassistant.update_entity
         target:
